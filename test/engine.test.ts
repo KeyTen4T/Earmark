@@ -46,6 +46,7 @@ import './stored-json.test.ts';
 import './update.test.ts';
 // The finished shelf: year grouping, finish dates and half-star rating taps are pure.
 import './shelf.test.ts';
+import './library-poll.test.ts';
 
 test('sha1 matches node crypto across lengths', () => {
   for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 1000, 70000]) {

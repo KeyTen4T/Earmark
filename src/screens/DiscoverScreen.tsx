@@ -15,7 +15,7 @@ import type { HistoryItem } from '../recommend';
 
 type AddState = 'adding' | 'added';
 
-type Props = { token: string; history: HistoryItem[]; scrapers: ScraperDef[]; bottomPad: number; onAdded: () => void; goSources: () => void };
+type Props = { token: string; history: HistoryItem[]; scrapers: ScraperDef[]; bottomPad: number; onAdded: (hash?: string) => void; goSources: () => void };
 type Mode = 'catalog' | 'sources';
 
 /** Discover has two searches: the general audiobook catalogue, and the user's own sources (which can add to TorBox). */
@@ -154,7 +154,7 @@ function SourceSearch({ token, scrapers, bottomPad, onAdded, goSources, modeTogg
       haptic('bump');
       if (res?.queued_id && !res.torrent_id) toast(`“${r.title}” is queued on TorBox: your download slots are full. It joins the library when it starts.`);
       else toast(`Added “${r.title}” · ${status}`);
-      onAdded();
+      onAdded(hash);
     } catch (e: any) {
       setAdding((a) => { const n = { ...a }; delete n[r.id]; return n; });
       toast(e.message ?? 'Could not add', 'err');

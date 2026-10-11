@@ -34,6 +34,7 @@ export function LibraryScreen(props: {
   addRequest?: number; // changes when something outside the screen asks for the add sheet
   bottomPad: number;
   refresh: () => void;
+  onAdded: (hash?: string) => void; // a book was just sent to TorBox: look for it until it is listed
   onOpen: (b: TBTorrent) => void;
   onMeta: (all: Record<string, BookMeta>) => void;
   onProgress: (all: Record<string, Progress>) => void;
@@ -399,7 +400,7 @@ export function LibraryScreen(props: {
       </Animated.ScrollView>
       <StickyBar y={y} title="Library" />
 
-      <AddMagnetSheet visible={addOpen} onClose={() => setAddOpen(false)} token={props.token} onAdded={refresh} />
+      <AddMagnetSheet visible={addOpen} onClose={() => setAddOpen(false)} token={props.token} onAdded={props.onAdded} />
 
       <Sheet visible={!!menu} onClose={() => setMenu(null)} title={menu ? m(menu).title ?? prettyName(menu.name) : ''}>
         {menu && (
@@ -507,14 +508,14 @@ function LabeledInput({ label, value, onChangeText, placeholder }: {
   );
 }
 
-function AddMagnetSheet({ visible, onClose, token, onAdded }: { visible: boolean; onClose: () => void; token: string; onAdded: () => void }) {
+function AddMagnetSheet({ visible, onClose, token, onAdded }: { visible: boolean; onClose: () => void; token: string; onAdded: (hash?: string) => void }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const add = async () => {
     const v = text.trim();
     if (!/^magnet:\?/i.test(v)) return toast('That doesn’t look like a magnet link', 'err');
     setBusy(true);
-    try { await addMagnet(token, v); toast('Sent to TorBox'); setText(''); onClose(); onAdded(); }
+    try { const res = await addMagnet(token, v); toast('Sent to TorBox'); setText(''); onClose(); onAdded(res?.hash); }
     catch (e: any) { toast(e.message, 'err'); }
     finally { setBusy(false); }
   };
@@ -527,8 +528,8 @@ function AddMagnetSheet({ visible, onClose, token, onAdded }: { visible: boolean
     try {
       const bytes = new Uint8Array(await (await fetch(file.uri)).arrayBuffer());
       const t = torrentToMagnet(bytes);
-      await addMagnet(token, t.magnet, t.name);
-      toast(`Sent “${t.name || file.name}” to TorBox`); onClose(); onAdded();
+      const res = await addMagnet(token, t.magnet, t.name);
+      toast(`Sent “${t.name || file.name}” to TorBox`); onClose(); onAdded(res?.hash);
     } catch (e: any) {
       toast(/bencode|torrent|unexpected|invalid/i.test(e?.message ?? '') ? 'That file isn’t a valid .torrent' : e?.message ?? 'Could not add that file', 'err');
     } finally { setBusy(false); }

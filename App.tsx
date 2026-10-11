@@ -20,6 +20,7 @@ import {
 } from './src/storage';
 import { checkForUpdate, openUpdate, currentVersion, setKnownUpdate } from './src/update';
 import { shouldAutoCheck, summary } from './src/update-check';
+import { ADD_POLL_MS, NOT_WAITING, awaitAdded, settleAwaited, stillWaiting } from './src/library-poll';
 import { fillMissingCovers } from './src/covers';
 import { initDownloads, cachedBooks } from './src/downloads';
 import { initSync, setSyncLibrary, syncNow, onSyncApplied } from './src/sync';
@@ -73,6 +74,7 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   const [userScrapers, setUserScrapers] = useState<ScraperDef[]>([]);
   const [disabled, setDisabled] = useState<string[]>([]);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const awaited = useRef(NOT_WAITING); // books just sent to TorBox that the list doesn't show yet
   const corruptChecked = useRef(false);
   const updateChecked = useRef(false);
 
@@ -98,7 +100,10 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
       fillMissingCovers(b, m, setMeta).catch(() => {});
       // Poll while anything is still downloading so it flips to ready on its own.
       if (pollTimer.current) clearTimeout(pollTimer.current);
-      if (!usedCache && b.some((t) => !isReady(t) && !isStuck(t))) pollTimer.current = setTimeout(() => refresh(true), 15000);
+      // A book that was just added is looked for more often until it shows up.
+      if (!usedCache) awaited.current = settleAwaited(awaited.current, b.map((t) => t.hash), Date.now());
+      if (stillWaiting(awaited.current, Date.now())) pollTimer.current = setTimeout(() => refresh(true), ADD_POLL_MS);
+      else if (!usedCache && b.some((t) => !isReady(t) && !isStuck(t))) pollTimer.current = setTimeout(() => refresh(true), 15000);
     } catch (e: any) {
       if (!quiet) toast(e.message ?? 'Could not load library', 'err');
     } finally {
@@ -174,7 +179,7 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   }, [tab]);
 
   // TorBox's list can lag an add by a few seconds; without a second look the new book wouldn't appear.
-  const refreshAfterAdd = () => { refresh(true); setTimeout(() => refresh(true), 5000); };
+  const refreshAfterAdd = (hash?: string) => { awaited.current = awaitAdded(awaited.current, hash, Date.now()); refresh(true); };
 
   // What the listener has and how far they got, for personal recommendations.
   const history = useMemo<HistoryItem[]>(() => books.map((b) => {
@@ -213,7 +218,7 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
       <View style={{ flex: 1, paddingHorizontal: wide ? DESKTOP_GUTTER : 0 }}>
       <TabPane active={tab === 'library'}>
         <LibraryScreen token={token} books={books} progress={progress} meta={meta} refreshing={refreshing} loaded={loaded}
-          lastBookId={lastBookId} addRequest={addRequest} bottomPad={bottomPad} refresh={() => refresh()} onOpen={() => { setPlayerSheet(undefined); setPlayerOpen(true); }} onMeta={setMeta} onProgress={setProgress} goDiscover={() => setTab('search')} />
+          lastBookId={lastBookId} addRequest={addRequest} bottomPad={bottomPad} refresh={() => refresh()} onAdded={refreshAfterAdd} onOpen={() => { setPlayerSheet(undefined); setPlayerOpen(true); }} onMeta={setMeta} onProgress={setProgress} goDiscover={() => setTab('search')} />
       </TabPane>
       <TabPane active={tab === 'search'}>
         <DiscoverScreen token={token} history={history} scrapers={enabledScrapers} bottomPad={bottomPad} onAdded={refreshAfterAdd} goSources={() => setTab('sources')} />
