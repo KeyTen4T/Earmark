@@ -14,7 +14,12 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.6** (11 Oct), the first from the public repo. It adds the in-app update
+- **Current release: 1.3.7** (11 Oct): the finished shelf. The Library's Finished filter lists books by
+  year with the date finished and the user's own half-star rating (`src/shelf.ts`; `finishedAt` and
+  `rating` live in `BookMeta` and sync with it). A rating on a book linked to Hardcover is pushed by
+  `syncRating` in `src/hardcover.ts`; that mutation has never been run against Hardcover. Versions
+  before 1.3.7 drop both fields when they sync. Seen working in a browser with a fake library only.
+- **1.3.6** (11 Oct) was the first from the public repo. It adds the in-app update
   check (`src/update.ts`, `src/update-check.ts`), the app icon (`assets/icon/`, drawn to Delta Icons'
   template), and takes the third-party search addresses out of the code: a previously fetched
   audiobook source is migrated once into the user's own sources, and the read-along EPUB search
