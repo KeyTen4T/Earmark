@@ -221,7 +221,7 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
           lastBookId={lastBookId} addRequest={addRequest} bottomPad={bottomPad} refresh={() => refresh()} onAdded={refreshAfterAdd} onOpen={() => { setPlayerSheet(undefined); setPlayerOpen(true); }} onMeta={setMeta} onProgress={setProgress} goDiscover={() => setTab('search')} />
       </TabPane>
       <TabPane active={tab === 'search'}>
-        <DiscoverScreen token={token} history={history} scrapers={enabledScrapers} bottomPad={bottomPad} onAdded={refreshAfterAdd} goSources={() => setTab('sources')} />
+        <DiscoverScreen token={token} history={history} scrapers={enabledScrapers} bottomPad={bottomPad} active={tab === 'search'} onAdded={refreshAfterAdd} goSources={() => setTab('sources')} />
       </TabPane>
       <TabPane active={tab === 'sources'}>
         <SettingsScreen builtins={builtins} userScrapers={userScrapers} disabled={disabled} bottomPad={bottomPad}

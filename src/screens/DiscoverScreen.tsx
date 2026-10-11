@@ -1,13 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, TextInput, ActivityIndicator, Keyboard, ScrollView, Alert, Animated, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { createAudioPlayer } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { C, R, T } from '../theme';
+import { C, R, T, fmtTime } from '../theme';
 import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY } from '../components/ui';
 import { ScraperDef, SearchResult, runSearch, resolveMagnet, dedupeResults, fetchDetail } from '../scrapers/engine';
 import { isFullCast } from '../scrapers/cast';
 import { hashFromMagnet } from '../scrapers/bencode';
-import { addMagnet, checkCached, torrentHealth } from '../torbox';
+import { addMagnet, checkCached, torrentHealth, listTorrents, getStreamUrl, deleteTorrent } from '../torbox';
+import { createPreviewController, canPreview, magnetFor, type PreviewController, type PreviewState } from '../preview';
+import { usePlayer } from '../player/PlayerContext';
 import { saveMeta } from '../storage';
 import { CatalogSearch } from './CatalogSearch';
 import { useLayout } from '../layout';
@@ -15,7 +18,7 @@ import type { HistoryItem } from '../recommend';
 
 type AddState = 'adding' | 'added';
 
-type Props = { token: string; history: HistoryItem[]; scrapers: ScraperDef[]; bottomPad: number; onAdded: (hash?: string) => void; goSources: () => void };
+type Props = { token: string; history: HistoryItem[]; scrapers: ScraperDef[]; bottomPad: number; active: boolean; onAdded: (hash?: string) => void; goSources: () => void };
 type Mode = 'catalog' | 'sources';
 
 /** Discover has two searches: the general audiobook catalogue, and the user's own sources (which can add to TorBox). */
@@ -46,7 +49,7 @@ export function DiscoverScreen(props: Props) {
   );
 }
 
-function SourceSearch({ token, scrapers, bottomPad, onAdded, goSources, modeToggle, seed }: Props & {
+function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, modeToggle, seed }: Props & {
   modeToggle: React.ReactNode; seed: { q: string; n: number } | null; // seed: a search handed over from the catalogue
 }) {
   const insets = useSafeAreaInsets();
@@ -66,6 +69,32 @@ function SourceSearch({ token, scrapers, bottomPad, onAdded, goSources, modeTogg
   const listCols = wide && contentWidth >= 980 ? 2 : 1;
   // The sheet reads the live row, so filling in the narrator updates the sheet and the list at once.
   const detail = detailId ? results.find((r) => r.id === detailId) ?? null : null;
+
+  const player = usePlayer();
+  const [previewState, setPreviewState] = useState<PreviewState>({ phase: 'off', elapsed: 0 });
+  // TorBox can only stream what the account already has, so a preview adds the torrent (and removes it
+  // again unless the user taps Add). The controller owns that decision; see src/preview.ts.
+  const preview = useMemo<PreviewController>(() => createPreviewController({
+    listTorrents: () => listTorrents(token),
+    addMagnet: (magnet, name) => addMagnet(token, magnet, name),
+    getStreamUrl: (torrentId, fileId) => getStreamUrl(token, torrentId, fileId),
+    deleteTorrent: (torrentId) => deleteTorrent(token, torrentId),
+    createPlayer: (uri, onStatus) => {
+      const p = createAudioPlayer({ uri });
+      p.addListener('playbackStatusUpdate', (s: any) => onStatus({
+        duration: s?.duration ?? 0, position: s?.currentTime ?? 0,
+        didJustFinish: !!s?.didJustFinish, error: typeof s?.error === 'string' && s.error ? s.error : null,
+      }));
+      return p;
+    },
+    toast,
+    onState: setPreviewState,
+  }), [token]);
+
+  // A preview belongs to the open sheet: closing it or opening another result ends the preview (and
+  // deletes its torrent when it added one the user didn't keep). Leaving Discover ends it too.
+  useEffect(() => () => preview.stop(), [detailId, preview]);
+  useEffect(() => { if (!active) preview.stop(); }, [active, preview]);
 
   const search = async (text = q) => {
     const query = text.trim();
@@ -115,10 +144,27 @@ function SourceSearch({ token, scrapers, bottomPad, onAdded, goSources, modeTogg
       .catch(() => {}); // an unreachable source just leaves the row as it was
   }, [detailId]);
 
+  const startPreview = (r: SearchResult) => {
+    const magnet = r.magnet ?? magnetFor(r.infoHash, r.title);
+    if (!magnet) return;
+    if (player.playing) player.toggle(); // the book stays paused; a preview never resumes it
+    void preview.start({ id: r.id, hash: r.infoHash, magnet, title: r.title, narrator: r.narrator });
+  };
+
   const add = async (r: SearchResult) => {
     if (adding[r.id]) return;
+    // A preview may already have added the torrent: keep it rather than adding a second copy.
+    const handoff = preview.keep(r.id);
     setAdding((a) => ({ ...a, [r.id]: 'adding' }));
     try {
+      if (handoff) {
+        setAdding((a) => ({ ...a, [r.id]: 'added' }));
+        haptic('bump');
+        if (handoff.hash) await saveMeta(handoff.hash, { title: r.title, author: r.author, narrator: r.narrator, cover: r.cover });
+        toast(`Added “${r.title}” · ready now`);
+        onAdded(handoff.hash);
+        return;
+      }
       const def = scrapers.find((s) => s.id === r.scraperId);
       const magnet = await resolveMagnet(def, r);
       // TorBox can only deliver a book it already has cached or can download from seeders, so check first.
@@ -233,13 +279,13 @@ function SourceSearch({ token, scrapers, bottomPad, onAdded, goSources, modeTogg
         }
         renderItem={({ item: r, index }) => (
           <FadeIn index={index} style={listCols > 1 ? { flex: 1 } : undefined}>
-            <ResultRow r={r} cached={!!r.infoHash && cached.has(r.infoHash)} state={adding[r.id]} onAdd={() => add(r)} onPress={() => setDetailId(r.id)} />
+            <ResultRow r={r} cached={!!r.infoHash && cached.has(r.infoHash)} state={adding[r.id]} onAdd={() => add(r)} onPress={() => { preview.stop(); setDetailId(r.id); }} />
           </FadeIn>
         )}
       />
       <StickyBar y={y} title={searched ? `“${searched}”` : 'Discover'} />
 
-      <Sheet visible={!!detail} onClose={() => setDetailId(null)}>
+      <Sheet visible={!!detail} onClose={() => { preview.stop(); setDetailId(null); }}>
         {detail && (
           <View style={{ paddingHorizontal: 20, paddingTop: 4, gap: 16 }}>
             <View style={{ flexDirection: 'row', gap: 16 }}>
@@ -261,6 +307,25 @@ function SourceSearch({ token, scrapers, bottomPad, onAdded, goSources, modeTogg
             <Button label={adding[detail.id] === 'added' ? 'Added to library' : 'Send to TorBox'}
               icon={adding[detail.id] === 'added' ? 'checkmark' : 'cloud-download-outline'}
               loading={adding[detail.id] === 'adding'} disabled={adding[detail.id] === 'added'} onPress={() => add(detail)} />
+            {previewState.phase === 'preparing' ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 2 }}>
+                <ActivityIndicator color={C.accent} />
+                <Text style={T.body}>Preparing preview…</Text>
+              </View>
+            ) : previewState.phase === 'playing' ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.elevated, borderWidth: 1, borderColor: C.line, borderRadius: R.pill, paddingLeft: 16, paddingRight: 8, paddingVertical: 8 }}>
+                <Ionicons name="volume-high" size={18} color={C.accent} />
+                <Text style={{ color: C.text, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{fmtTime(previewState.elapsed)}</Text>
+                {detail.narrator ? <Text numberOfLines={1} style={[T.small, { flex: 1 }]}>{detail.narrator}</Text> : <View style={{ flex: 1 }} />}
+                <Tap onPress={() => preview.stop()} hitSlop={8} accessibilityLabel="Stop the narrator preview"
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: R.pill, backgroundColor: C.surface, borderWidth: 1, borderColor: C.line }}>
+                  <Ionicons name="stop" size={14} color={C.danger} />
+                  <Text style={{ color: C.danger, fontWeight: '700', fontSize: 13 }}>Stop</Text>
+                </Tap>
+              </View>
+            ) : canPreview(detail, !!detail.infoHash && cached.has(detail.infoHash)) ? (
+              <Button kind="ghost" icon="play" label="Preview narrator" onPress={() => startPreview(detail)} />
+            ) : null}
           </View>
         )}
       </Sheet>
