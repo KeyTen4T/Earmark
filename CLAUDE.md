@@ -14,7 +14,23 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.10** (11 Oct): narrator preview. A cached source result's detail sheet has
+- **Current release: 1.3.11** (11 Oct), six additions, all run only in a browser with a fake library
+  unless noted:
+  - Chapters inside a one-file book (`src/chapters/embedded.ts` pure parser for m4b `chpl` /
+    QuickTime chapter track and MP3 ID3 `CHAP`; `src/chapters/fetch.ts` reads it with Range requests
+    in 128 KB blocks; `embedded` in `PlayerContext`). Saved `Progress` stays file-based. Checked on
+    ffmpeg-made files, never on a real audiobook from TorBox. The Library's Continue card still says
+    "Chapter 1 of 1" for such a book.
+  - Car mode (`src/screens/CarMode.tsx`), phone layout only; keeps the screen awake with
+    `expo-keep-awake`, which Expo already ships. Not seen on a phone.
+  - Follow a narrator (`src/narrators.ts`; list is device-local and in backups).
+  - Import reading history (`src/reading-history.ts`, `src/goodreads.ts`): Hardcover or a Goodreads
+    CSV. Unmatched books become device-local "read elsewhere" shelf rows. The Hardcover query
+    (`HC_HISTORY_QUERY`) has never been run; the Goodreads path was not run in the browser either.
+  - Share my setup (a `kind: "setup"` file: sources and the EPUB search address only) and What's new
+    (release notes once per new version; `whatsNewDecision` in `src/update-check.ts`). Neither was
+    opened in the browser.
+- **1.3.10** (11 Oct): narrator preview. A cached source result's detail sheet has
   "Preview narrator" (`src/preview.ts`: pure decisions plus a controller with injected TorBox calls;
   wiring in `DiscoverScreen.tsx`). It adds the torrent, plays up to 75 s, and deletes it unless the
   user taps Send to TorBox. It may delete only a torrent its own add returned, after an account
