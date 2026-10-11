@@ -7,6 +7,8 @@ import app from '../../app.json';
 import { Tap, Sheet, Button, Chip, toast, IconName, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction } from '../components/ui';
 import type { ScraperDef } from '../scrapers/engine';
 import { pickScraperFiles, fetchScrapers, parseScrapers, EXAMPLE_SCRAPER } from '../scrapers/importer';
+import { makeBackupFile, pickBackupFile, applyBackupFile, exportBackupFile } from '../backup-io';
+import { backupSummary, type BackupFile, type BackupSummary } from '../backup';
 import { usePlayer } from '../player/PlayerContext';
 import { SourceEditor } from '../components/SourceEditor';
 import { AiProvider, providerFor, providerName, pickModel, cleanKey } from '../recommend';
@@ -51,6 +53,9 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => getSyncStatus());
   useEffect(() => subscribeSyncStatus(setSyncStatus), []);
+  const [backupFile, setBackupFile] = useState<BackupFile | null>(null);
+  const [backupBusy, setBackupBusy] = useState<null | 'export' | 'merge' | 'replace'>(null);
+  const backupInfo = backupFile ? backupSummary(backupFile) : null;
   const [downloads, setDownloads] = useState<Downloads>(() => getDownloads());
   useEffect(() => subscribeDownloads(setDownloads), []);
   const [checking, setChecking] = useState(false);
@@ -148,6 +153,42 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
     onSignOut();
   };
 
+  const exportData = async () => {
+    if (backupBusy) return;
+    setBackupBusy('export');
+    try {
+      const r = await exportBackupFile(await makeBackupFile());
+      if (r === 'saved') toast('Backup saved');
+    } catch (e: any) { toast(e?.message ?? 'Could not export data', 'err'); }
+    finally { setBackupBusy(null); }
+  };
+
+  const pickImport = async () => {
+    try {
+      const f = await pickBackupFile();
+      if (f) setBackupFile(f);
+    } catch (e: any) { toast(e?.message ?? 'Could not read that file', 'err'); }
+  };
+
+  const applyImport = async (mode: 'merge' | 'replace') => {
+    if (!backupFile) return;
+    if (mode === 'replace' && !(await confirmAction('Replace all data on this device?',
+      `This overwrites progress, ratings and the rest on this device${syncStatus.connected ? ', and — with sync on — on your other devices' : ''}.`,
+      'Replace'))) return;
+    setBackupBusy(mode);
+    try {
+      const s = backupSummary(backupFile);
+      const next = await applyBackupFile(backupFile, mode);
+      onScrapers(next.sources);
+      onDisabled(next.disabled);
+      reloadEbookUrl();
+      reloadRaServer();
+      setBackupFile(null);
+      toast(`${mode === 'replace' ? 'Replaced' : 'Merged'}: ${s.withProgress} books with progress, ${s.sources} sources`);
+    } catch (e: any) { toast(e?.message ?? 'Could not import the backup', 'err'); }
+    finally { setBackupBusy(null); }
+  };
+
   // The manual check ignores both the 24 h throttle and the version the user dismissed.
   const checkUpdates = async () => {
     if (checking) return;
@@ -214,6 +255,20 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
               : syncStatus.lastSyncAt ? `Synced ${relativeTime(syncStatus.lastSyncAt)}` : 'Connected'}
             right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
         </Section>
+
+        <Section title="Backup">
+          <Row onPress={exportData}
+            left={<Badge icon="download-outline" color="#4ADE80" />}
+            title="Export data"
+            sub="Save progress, ratings, sources and settings to a file"
+            right={backupBusy === 'export' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+          <Row last onPress={pickImport}
+            left={<Badge icon="cloud-upload-outline" color="#4ADE80" />}
+            title="Import data"
+            sub="Restore from a backup file"
+            right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+        </Section>
+        <Text style={[T.small, { marginTop: -12, marginBottom: 12 }]}>Keys and tokens are never included in a backup.</Text>
 
         <Section title="Read-along">
           <Row onPress={() => setRaOpen(true)}
@@ -315,6 +370,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
       <SyncSheet visible={syncOpen} onClose={() => setSyncOpen(false)} status={syncStatus} />
       <ReadalongServerSheet visible={raOpen} onClose={() => setRaOpen(false)} onChanged={reloadRaServer} />
       <EbookSearchSheet visible={ebookOpen} onClose={() => setEbookOpen(false)} onChanged={reloadEbookUrl} />
+      <ImportBackupSheet visible={!!backupFile} info={backupInfo} busy={backupBusy} onClose={() => setBackupFile(null)} onMerge={() => applyImport('merge')} onReplace={() => applyImport('replace')} />
     </View>
   );
 }
@@ -541,6 +597,31 @@ function EbookSearchSheet({ visible, onClose, onChanged }: {
         {result ? <Text style={[T.small, { color: result.kind === 'ok' ? C.good : C.danger }]}>{result.text}</Text> : null}
         <Button label="Save" icon="save-outline" onPress={save} />
         {url.trim() ? <Button kind="danger" icon="trash-outline" label="Clear" onPress={clear} /> : null}
+      </View>
+    </Sheet>
+  );
+}
+
+function ImportBackupSheet({ visible, info, busy, onClose, onMerge, onReplace }: {
+  visible: boolean; info: BackupSummary | null; busy: null | 'export' | 'merge' | 'replace';
+  onClose: () => void; onMerge: () => void; onReplace: () => void;
+}) {
+  return (
+    <Sheet visible={visible} onClose={onClose} title="Import data">
+      <View style={{ paddingHorizontal: 20, gap: 12 }}>
+        {info ? (
+          <>
+            <Text style={T.body}>
+              Exported {info.exportedAt ? new Date(info.exportedAt).toLocaleString() : 'at an unknown date'}{info.appVersion ? ` by Earmark ${info.appVersion}` : ''}.
+            </Text>
+            <Text style={T.body}>
+              {info.withProgress} books with progress · {info.finished} finished · {info.ratings} ratings · {info.wishlist} want to listen · {info.readalongs} read-alongs · {info.sources} sources
+            </Text>
+            <Button label="Merge" icon="git-merge-outline" onPress={onMerge} loading={busy === 'merge'} disabled={busy !== null && busy !== 'merge'} />
+            <Button kind="ghost" label="Replace" icon="swap-horizontal-outline" onPress={onReplace} loading={busy === 'replace'} disabled={busy !== null && busy !== 'replace'} />
+            <Text style={T.small}>Merge keeps what is on this device and takes newer records from the file. Replace makes the file the only truth on this device. Keys and tokens are not included.</Text>
+          </>
+        ) : null}
       </View>
     </Sheet>
   );

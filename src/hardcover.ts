@@ -99,6 +99,10 @@ async function putLink(torrentId: number, l: HcLink | null) {
 }
 export const unlink = (torrentId: number) => putLink(torrentId, null);
 
+/** All torrent <-> Hardcover links, for a backup. Not secret: contains no token. */
+export const loadHcLinks = (): Promise<Record<string, HcLink>> => loadLinks();
+export const saveHcLinks = (all: Record<string, HcLink>) => AsyncStorage.setItem('hc_links', JSON.stringify(all));
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 /** Links a torrent to a Hardcover book, marks it Currently Reading and opens a read session. */

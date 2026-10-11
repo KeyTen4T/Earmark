@@ -91,6 +91,13 @@ export async function applyRemoteProgress(entries: { id: number; p: Progress }[]
   for (const { id, p } of entries) all[String(id)] = p;
   await setJSON('progress', all);
 }
+/** Deletes progress for the given torrent ids; used by a backup Replace. */
+export async function removeProgress(ids: number[]) {
+  if (!ids.length) return;
+  const all = await loadProgress();
+  for (const id of ids) delete all[String(id)];
+  await setJSON('progress', all);
+}
 
 // ---- Offline downloads (device-local; deliberately absent from the sync document) ----
 export const loadDownloads = () => getJSON<Downloads>('downloads', {});

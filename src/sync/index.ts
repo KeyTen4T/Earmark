@@ -8,9 +8,10 @@ import {
 } from './merge';
 import { findGist, createGist, readGist, writeGist, verifyToken, GistMissing } from './github';
 import { emitSyncApplied, onLocalChange, onSyncApplied } from './events';
+import { replaceDoc } from '../backup';
 import type { TBTorrent } from '../torbox';
 import {
-  loadProgress, applyRemoteProgress, loadMeta, applyRemoteMeta,
+  loadProgress, applyRemoteProgress, removeProgress, loadMeta, applyRemoteMeta,
   loadHiddenBooks, applyRemoteHidden, loadWishlist, applyRemoteWishlist,
   loadSettings, applyRemoteSettings, loadStamps, loadAllReadalong, applyRemoteReadalong,
   loadGistId, saveGistId, clearGistId, getGithubToken, setGithubToken, clearGithubToken,
@@ -172,7 +173,7 @@ async function readDoc(t: string, id: string, signal: AbortSignal): Promise<Sync
 const stampAt = (s: number | undefined) => Math.max(s ?? 0, 1); // pre-existing data: any real edit beats it
 
 /** Local storage -> sync document. Progress is keyed by info-hash via the library list. */
-async function buildLocalDoc(): Promise<SyncDoc> {
+export async function buildLocalDoc(): Promise<SyncDoc> {
   const [progress, meta, hidden, wishlist, settings, stamps, readalong] = await Promise.all([
     loadProgress(), loadMeta(), loadHiddenBooks(), loadWishlist(), loadSettings(), loadStamps(), loadAllReadalong(),
   ]);
@@ -246,4 +247,24 @@ function diffMap<T, U>(merged: Record<string, T>, local: Record<string, T>, toEn
     out.push(toEntry(key, merged[key]));
   }
   return out;
+}
+
+/**
+ * Writes a backup's sync document into local storage. Merge loses to newer local records; Replace
+ * re-stamps every restored record and tombstones every device record the file lacked, so the next
+ * sync pushes the restored state instead of the gist overwriting it.
+ */
+export async function applyBackupSync(doc: SyncDoc, mode: 'merge' | 'replace'): Promise<void> {
+  const local = await buildLocalDoc();
+  const next = mode === 'replace' ? replaceDoc(local, doc, Date.now()) : mergeDocs(local, doc);
+  const changed = await applyMerged(next, local);
+  if (mode === 'replace') {
+    // Progress carries no tombstone in the sync format, so device-only progress is deleted here.
+    const gone = Object.keys(local.progress)
+      .filter((hash) => !(hash in doc.progress))
+      .map((hash) => hashToId.get(hash))
+      .filter((id): id is number => id !== undefined);
+    if (gone.length) { await removeProgress(gone); }
+  }
+  if (changed || mode === 'replace') emitSyncApplied();
 }
