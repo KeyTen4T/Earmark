@@ -4,9 +4,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, fmtTime } from '../theme';
-import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY } from '../components/ui';
+import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, FullCastChip } from '../components/ui';
 import { ScraperDef, SearchResult, runSearch, resolveMagnet, dedupeResults, fetchDetail } from '../scrapers/engine';
-import { isFullCast } from '../scrapers/cast';
+import { isFullCast, selectSourceResults } from '../scrapers/cast';
 import { splitNarrators, isFavourite, resultFavourites, toggleNarrator, favouriteFirst } from '../narrators';
 import { hashFromMagnet } from '../scrapers/bencode';
 import { addMagnet, checkCached, torrentHealth, listTorrents, getStreamUrl, deleteTorrent } from '../torbox';
@@ -59,6 +59,7 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
   const [pending, setPending] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [source, setSource] = useState<string | null>(null);
+  const [castOnly, setCastOnly] = useState(false);
   const [cached, setCached] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState<Record<string, AddState>>({});
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -102,7 +103,7 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
     if (!query || !scrapers.length) return;
     Keyboard.dismiss();
     const my = ++run.current;
-    setResults([]); setErrors({}); setSource(null); setSearched(query);
+    setResults([]); setErrors({}); setSource(null); setCastOnly(false); setSearched(query);
     fetchedDetails.current.clear();
     setPending(scrapers.map((s) => s.id));
     await Promise.all(scrapers.map(async (s) => {
@@ -217,9 +218,10 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
 
   // Keep the existing order (source grouping when a source chip is active) but float results read by
   // a followed narrator to the top of it, stably: within each group the original order is preserved.
-  const base = source ? results.filter((r) => r.scraperId === source) : results;
+  const base = selectSourceResults(results, source, castOnly);
   const shown = favouriteFirst(base, (r) => r.narrator, narrators);
   const counts = results.reduce<Record<string, number>>((a, r) => ((a[r.scraperId] = (a[r.scraperId] ?? 0) + 1), a), {});
+  const castCount = results.filter(isFullCast).length;
   const busy = pending.length > 0;
 
   const header = (
@@ -241,6 +243,7 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
       {searched ? (
         <ChipRow style={{ paddingVertical: 16 }}>
           <Chip label={`All ${results.length}`} active={!source} onPress={() => setSource(null)} />
+          {castCount ? <Chip label={`Full cast ${castCount}`} active={castOnly} onPress={() => setCastOnly((v) => !v)} /> : null}
           {scrapers.map((s) => (
             <Chip key={s.id} active={source === s.id} onPress={() => setSource(s.id)}
               label={`${s.name} ${pending.includes(s.id) ? '…' : errors[s.id] ? '!' : counts[s.id] ?? 0}`} />
@@ -390,11 +393,7 @@ function ResultRow({ r, cached, favourite, state, onAdd, onPress }: { r: SearchR
               <Ionicons name="flash" size={10} color={C.accent} /><Text style={{ color: C.accent, fontSize: 10, fontWeight: '800' }}>INSTANT</Text>
             </View>
           )}
-          {isFullCast(r) && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: 'rgba(74,222,128,0.15)', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 }}>
-              <Ionicons name="people" size={10} color={C.good} /><Text style={{ color: C.good, fontSize: 10, fontWeight: '800' }}>FULL CAST</Text>
-            </View>
-          )}
+          {isFullCast(r) && <FullCastChip />}
           <Text numberOfLines={1} style={[T.small, { flex: 1 }]}>{r.icon ? `${r.icon} ` : ''}{bits || r.scraperName}</Text>
         </View>
       </View>

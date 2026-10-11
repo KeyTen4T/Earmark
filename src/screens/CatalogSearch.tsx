@@ -5,8 +5,9 @@ import { createAudioPlayer } from 'expo-audio';
 import type { AudioPlayer } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
-import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY } from '../components/ui';
-import { CatalogBook, GENRES, searchCatalog, lookupCatalog, topCharts } from '../catalog';
+import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, FullCastChip } from '../components/ui';
+import { CatalogBook, GENRES, searchCatalog, lookupCatalog, topCharts, fullCastShelf, FULL_CAST } from '../catalog';
+import { cleanFullCastTitle } from '../scrapers/cast';
 import { loadBookInfo, type BookInfo, type Rating } from '../ratings';
 import { formatAverage, formatRatings, ratingAccessibilityLabel, type Review } from '../ratings-match';
 import { loadWishlist, saveWishlist, getAiKey } from '../storage';
@@ -69,9 +70,9 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
     if (shelf === SAVED) return;
     let live = true;
     setChart([]); setChartError(''); setChartBusy(true); heroX.setValue(0);
-    topCharts(shelf)
+    (shelf === FULL_CAST ? fullCastShelf() : topCharts(shelf))
       .then((b) => { if (live) setChart(b); })
-      .catch((e) => { if (live) setChartError(e.message ?? 'Couldn’t load the charts'); })
+      .catch((e) => { if (live) setChartError(e.message ?? (shelf === FULL_CAST ? 'Couldn’t load the full-cast shelf' : 'Couldn’t load the charts')); })
       .finally(() => { if (live) setChartBusy(false); });
     return () => { live = false; };
   }, [shelf]);
@@ -85,7 +86,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
     setSurprising(true);
     try {
       const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-      const pool0 = shelf === SAVED ? await topCharts('') : chart.length ? chart : await topCharts(shelf);
+      const pool0 = shelf === SAVED ? await topCharts('') : chart.length ? chart : shelf === FULL_CAST ? await fullCastShelf() : await topCharts(shelf);
       // Leave out what they already have, already saved, or were just shown.
       const have = history.map((h) => norm(h.title)).filter(Boolean);
       const fresh = pool0.filter((b) => !wishlist.some((w) => w.id === b.id) && !have.some((t) => norm(b.title).startsWith(t) || t.startsWith(norm(b.title))));
@@ -185,10 +186,12 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
 
   const browsing = !searched;
   const showingWishlist = browsing && shelf === SAVED;
-  const showingChart = browsing && !showingWishlist;
+  const showingFullCast = browsing && shelf === FULL_CAST;
+  const showingChart = browsing && !showingWishlist && !showingFullCast;
   const genre = GENRES.find((g) => g.id === shelf);
-  // The chart's first ten are the big cover row in the header; the list carries on from 11.
-  const data = showingChart ? chart.slice(HERO_COUNT) : showingWishlist ? wishlist : results;
+  // The chart's first ten are the big cover row in the header; the list carries on from 11. The full
+  // cast shelf is not a chart, so it is shown whole, without ranks.
+  const data = showingChart ? chart.slice(HERO_COUNT) : showingFullCast ? chart : showingWishlist ? wishlist : results;
 
   const header = (
     <View style={{ paddingTop: insets.top + (wide ? 28 : 12) }}>
@@ -209,12 +212,13 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
         <ChipRow style={{ paddingTop: 14 }}>
           {GENRES.slice(0, 1).map((g) => <Chip key={g.id} label={g.name} active={shelf === g.id} onPress={() => setShelf(g.id)} />)}
           <Chip label={wishlist.length ? `Want to listen · ${wishlist.length}` : 'Want to listen'} active={shelf === SAVED} onPress={() => setShelf(SAVED)} />
+          <Chip label="Full cast" active={shelf === FULL_CAST} onPress={() => setShelf(FULL_CAST)} />
           {GENRES.slice(1).map((g) => <Chip key={g.id} label={g.name} active={shelf === g.id} onPress={() => setShelf(g.id)} />)}
         </ChipRow>
       ) : null}
       {browsing ? (
         <View style={{ paddingHorizontal: 20, marginTop: 14, maxWidth: 360 }}>
-          <Button icon="dice-outline" label={shelf && shelf !== SAVED ? `Surprise me · ${genre?.name}` : 'Surprise me'} onPress={surprise} loading={surprising} />
+          <Button icon="dice-outline" label={shelf === FULL_CAST ? 'Surprise me · Full cast' : shelf && shelf !== SAVED ? `Surprise me · ${genre?.name}` : 'Surprise me'} onPress={surprise} loading={surprising} />
         </View>
       ) : null}
       {showingChart && chart.length ? (
@@ -252,6 +256,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
       ) : null}
       <Text style={[T.label, { paddingHorizontal: 20, marginTop: 20, marginBottom: 6 }]}>
         {showingChart ? (chartBusy ? 'Loading the charts…' : chart.length > HERO_COUNT ? `The rest of the top ${chart.length}` : '')
+          : showingFullCast ? (chartBusy ? 'Loading full cast…' : chart.length ? `Full cast & dramatised · ${chart.length}` : '')
           : showingWishlist ? (wishlist.length ? `Want to listen · ${wishlist.length}` : '') : busy ? 'Searching…' : `${results.length} in the catalogue`}
       </Text>
       {showingChart && chartBusy ? (
@@ -267,7 +272,17 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
           ))}
         </View>
       ) : null}
-      {showingChart && chartError ? <Text style={{ color: C.danger, paddingHorizontal: 20, marginBottom: 8 }}>{chartError}</Text> : null}
+      {showingFullCast && chartBusy ? (
+        <View style={{ paddingHorizontal: 20, gap: 14 }}>
+          {[0, 1, 2, 3].map((i) => (
+            <View key={i} style={{ flexDirection: 'row', gap: 14, alignItems: 'center' }}>
+              <Skeleton width={64} height={64} radius={10} />
+              <View style={{ flex: 1, gap: 8 }}><Skeleton width="80%" height={14} radius={7} /><Skeleton width="45%" height={12} radius={6} /></View>
+            </View>
+          ))}
+        </View>
+      ) : null}
+      {(showingChart || showingFullCast) && chartError ? <Text style={{ color: C.danger, paddingHorizontal: 20, marginBottom: 8 }}>{chartError}</Text> : null}
       {error ? <Text style={{ color: C.danger, paddingHorizontal: 20, marginBottom: 8 }}>{error}</Text> : null}
     </View>
   );
@@ -282,12 +297,16 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         contentContainerStyle={{ paddingBottom: bottomPad + 24 }}
-        ListEmptyComponent={busy || error || showingChart ? null : showingWishlist ? (
-          <Empty icon="bookmark-outline" title="Nothing saved yet"
-            body="Tap the bookmark on any book in the charts or in a search and it’ll be kept here." />
-        ) : (
-          <Empty icon="sad-outline" title="No results" body={`Nothing matched “${searched}”. Try just the title or the author.`} />
-        )}
+        ListEmptyComponent={busy || error || showingChart || (showingFullCast && (chartBusy || !!chartError)) ? null
+          : showingFullCast ? (
+            <Empty icon="people-outline" title="No full-cast books"
+              body="The catalogue returned no dramatised or full-cast audiobooks just now." />
+          ) : showingWishlist ? (
+            <Empty icon="bookmark-outline" title="Nothing saved yet"
+              body="Tap the bookmark on any book in the charts or in a search and it’ll be kept here." />
+          ) : (
+            <Empty icon="sad-outline" title="No results" body={`Nothing matched “${searched}”. Try just the title or the author.`} />
+          )}
         renderItem={({ item: b, index }) => (
           <FadeIn index={index} style={listCols > 1 ? { flex: 1 } : undefined}>
           <Tap onPress={() => openDetail(b)} scaleTo={0.98} hoverStyle={{ backgroundColor: C.hover }} style={{ flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, paddingVertical: 10 }}>
@@ -296,7 +315,10 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
             <View style={{ flex: 1, gap: 3 }}>
               <Text numberOfLines={2} style={[T.title, { fontSize: 15 }]}>{b.title}</Text>
               {b.author ? <Text numberOfLines={1} style={T.body}>{b.author}</Text> : null}
-              <Text numberOfLines={1} style={T.small}>{[b.genre, b.year].filter(Boolean).join('  ·  ')}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {showingFullCast ? <FullCastChip /> : null}
+                <Text numberOfLines={1} style={[T.small, { flex: 1 }]}>{[b.genre, b.year].filter(Boolean).join('  ·  ')}</Text>
+              </View>
             </View>
             <Tap onPress={() => toggleWanted(b)} hitSlop={8} scaleTo={0.85} accessibilityLabel={wanted(b) ? 'Remove from Want to listen' : 'Save to Want to listen'} style={{
               width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
@@ -310,7 +332,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
           </FadeIn>
         )}
       />
-      <StickyBar y={y} title={searched ? `“${searched}”` : showingWishlist ? 'Want to listen' : genre?.id ? genre.name : 'Discover'} />
+      <StickyBar y={y} title={searched ? `“${searched}”` : showingFullCast ? 'Full cast' : showingWishlist ? 'Want to listen' : genre?.id ? genre.name : 'Discover'} />
 
       <Sheet visible={!!detail} onClose={closeDetail}>
         {detail && (
@@ -338,7 +360,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
               </FadeIn>
             ) : null}
             <Button kind="primary" icon="search" label="Search my sources"
-              onPress={() => { const b = detail; closeDetail(); onFindInSources(b.title); }} />
+              onPress={() => { const b = detail; closeDetail(); onFindInSources(showingFullCast ? cleanFullCastTitle(b.title) : b.title); }} />
             <View style={{ flexDirection: 'row', gap: 8 }}>
               {detail.previewUrl ? (
                 <Button kind="ghost" icon={sampling ? 'stop' : 'play'} label={sampling ? 'Stop sample' : 'Play sample'} onPress={() => toggleSample(detail)} style={{ flex: 1 }} />

@@ -2,6 +2,7 @@
 // Free, no key. Docs: https://performance-partners.apple.com/search-api
 // The same catalogue publishes best-seller charts, overall and per genre, which power Discover's browsing.
 import { decodeEntities } from './scrapers/template';
+import { isFullCast } from './scrapers/cast';
 
 export type CatalogBook = {
   id: string;
@@ -35,8 +36,8 @@ const fromSearch = (r: any): CatalogBook => ({
   previewUrl: r.previewUrl,
 });
 
-export async function searchCatalog(query: string): Promise<CatalogBook[]> {
-  const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=audiobook&entity=audiobook&limit=40`);
+export async function searchCatalog(query: string, fetcher: typeof fetch = fetch): Promise<CatalogBook[]> {
+  const res = await fetcher(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=audiobook&entity=audiobook&limit=40`);
   if (!res.ok) throw new Error(`Catalogue search failed (HTTP ${res.status})`);
   const json = await res.json();
   return (json.results ?? []).filter((r: any) => r.collectionId && r.collectionName).map(fromSearch);
@@ -96,5 +97,42 @@ export async function topCharts(genreId = '', fetcher: typeof fetch = fetch): Pr
     };
   });
   chartCache.set(genreId, { at: Date.now(), books });
+  return books;
+}
+
+// ---- Full cast: a shelf of dramatised and full-cast recordings, merged from several catalogue searches ----
+export const FULL_CAST = 'fullcast'; // the shelf id, kept out of the genre ids so topCharts never sees it
+const FULL_CAST_QUERIES = ['dramatized adaptation', 'full cast', 'graphicaudio', 'audio drama', 'bbc radio drama'];
+
+/**
+ * Merge catalogue searches into one shelf: take the results round-robin (so no single publisher fills
+ * the top), de-duplicate by catalogue id, and keep only recognisable full-cast books — the test reads
+ * the title, or the description passed through the `name` field. Pure, so the Node tests can exercise it.
+ */
+export function mergeFullCast(lists: readonly CatalogBook[][]): CatalogBook[] {
+  const rows = lists.filter((l) => Array.isArray(l) && l.length);
+  const out: CatalogBook[] = [];
+  const seen = new Set<string>();
+  const longest = rows.reduce((n, l) => Math.max(n, l.length), 0);
+  for (let i = 0; i < longest; i++) {
+    for (const list of rows) {
+      const b = list[i];
+      if (!b || seen.has(b.id)) continue;
+      seen.add(b.id);
+      if (isFullCast({ title: b.title, name: b.description })) out.push(b);
+    }
+  }
+  return out;
+}
+
+/** The full-cast shelf, merged and filtered, kept for half an hour like the charts. */
+export async function fullCastShelf(fetcher: typeof fetch = fetch): Promise<CatalogBook[]> {
+  const hit = chartCache.get(FULL_CAST);
+  if (hit && Date.now() - hit.at < CHART_TTL_MS) return hit.books;
+  const settled = await Promise.allSettled(FULL_CAST_QUERIES.map((q) => searchCatalog(q, fetcher)));
+  const lists = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
+  if (!lists.length) throw new Error('Couldn’t load the full-cast catalogue');
+  const books = mergeFullCast(lists);
+  chartCache.set(FULL_CAST, { at: Date.now(), books });
   return books;
 }

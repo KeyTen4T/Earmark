@@ -34,8 +34,9 @@ import './title-match.test.ts';
 import './library-search.test.ts';
 // Ratings and reviews on a Discover book's detail page: title cleaning, matching and formatting.
 import './ratings.test.ts';
-// Full-cast and dramatised detection for the sources list.
+// Full-cast and dramatised detection for the sources list, and the catalogue's full-cast shelf.
 import './cast.test.ts';
+import './catalog.test.ts';
 // Following narrators: name splitting, normalising, toggling and floating followed results up.
 import './narrators.test.ts';
 // Which content the wide player's second pane shows, and when it splits at all.

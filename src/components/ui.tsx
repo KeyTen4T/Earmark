@@ -227,6 +227,16 @@ export function Chip({ label, active, onPress, icon, accessibilityLabel }: { lab
   );
 }
 
+/** The small green badge that marks a full-cast or dramatised recording. */
+export function FullCastChip() {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: 'rgba(74,222,128,0.15)', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 }}>
+      <Ionicons name="people" size={10} color={C.good} />
+      <Text style={{ color: C.good, fontSize: 10, fontWeight: '800' }}>FULL CAST</Text>
+    </View>
+  );
+}
+
 /** A row of chips: swipes sideways on a phone, wraps onto more lines on desktop where there's no swiping. */
 export function ChipRow({ children, style }: { children: React.ReactNode; style?: StyleProp<ViewStyle> }) {
   const { wide } = useLayout();
