@@ -18,6 +18,8 @@ import { torrentToMagnet } from '../scrapers/bencode';
 import { getDownloads, subscribeDownloads, queueBook, pauseDownload, resumeDownload, removeDownload } from '../downloads';
 import { progressFraction, isComplete, type DownloadBook, type Downloads } from '../downloads/state';
 import { matchesLibrarySearch } from '../library-search';
+import { bookFinishedAt, formatFinishedDate, ratingAfterTap, shelfGroups } from '../shelf';
+import { syncRating } from '../hardcover';
 
 type Filter = 'all' | 'listening' | 'new' | 'done';
 
@@ -117,8 +119,18 @@ export function LibraryScreen(props: {
     };
     await saveProgress(b.id, p);
     props.onProgress({ ...progress, [b.id]: p });
+    if (b.hash) props.onMeta(await saveMeta(b.hash, { finishedAt: finished ? Date.now() : undefined }));
     syncAfterProgress(true);
     toast(finished ? 'Marked as finished' : 'Marked as not finished');
+  };
+
+  // A tap on a star sets or clears the book's own rating. The local change is saved and shown at
+  // once; a linked Hardcover book is pushed in the background.
+  const rate = async (b: TBTorrent, star: number) => {
+    if (!b.hash) return;
+    const next = ratingAfterTap(m(b).rating, star);
+    props.onMeta(await saveMeta(b.hash, { rating: next }));
+    void syncRating(b.id, next ?? null);
   };
 
   const ready = shelf.filter(isReady);
@@ -159,6 +171,9 @@ export function LibraryScreen(props: {
   // The search narrows whatever the chip already selected; titles, authors and narrators all match.
   const q = query.trim();
   const shown = q ? filtered.filter((b) => matchesLibrarySearch(b.name, meta[b.hash?.toLowerCase()], q)) : filtered;
+  // The Finished chip shows the shelf instead of the grid: finished books with their date and rating.
+  const shelfBooks = shown.map((book) => ({ book, finishedAt: bookFinishedAt(meta[book.hash?.toLowerCase() ?? ''], progress[book.id]) }));
+  const finishedGroups = shelfGroups(shelfBooks);
 
   // Two covers across on a phone; on desktop as many ~190px covers as fit. Measure the grid instead
   // of trusting contentWidth: the screen's own scrollbar takes a slice of the width it reports, so
@@ -292,7 +307,27 @@ export function LibraryScreen(props: {
               ))}
             </ChipRow>
 
-            {shown.length === 0 ? (
+            {filter === 'done' ? (
+              shown.length === 0 ? (
+                <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'No finished books yet.'}</Text>
+              ) : (
+                <View style={{ paddingHorizontal: 20, maxWidth: wide ? 720 : undefined }}>
+                  {finishedGroups.map((g) => (
+                    <View key={g.year ?? 'earlier'} style={{ marginBottom: 22 }}>
+                      <Text style={[T.label, { marginBottom: 10 }]}>{g.label}</Text>
+                      {g.books.map((e, i) => (
+                        <FadeIn key={e.book.id} index={i} delay={80}>
+                          <FinishedRow book={e.book} meta={m(e.book)} finishedAt={e.finishedAt}
+                            onOpen={() => { onOpen(e.book); player.open(e.book, m(e.book), { autoplay: true }); }}
+                            onMenu={() => setMenu(e.book)}
+                            onRate={(star) => rate(e.book, star)} />
+                        </FadeIn>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              )
+            ) : shown.length === 0 ? (
               <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'Nothing here yet.'}</Text>
             ) : (
               <View key={filter} style={{ flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 20, gap }} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
@@ -525,6 +560,62 @@ function DownloadMark({ rec }: { rec: DownloadBook }) {
     <View style={{ position: 'absolute', top: 8, left: 8, backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: R.pill, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', gap: 4, alignItems: 'center' }}>
       <Ionicons name={icon} size={12} color={color} />
       <Text style={{ color, fontSize: 11, fontWeight: '700' }}>{label}</Text>
+    </View>
+  );
+}
+
+/** One book on the finished shelf: cover, title, author, finish date and a tappable star rating. */
+function FinishedRow({ book, meta, finishedAt, onOpen, onMenu, onRate }: {
+  book: TBTorrent;
+  meta: BookMeta;
+  finishedAt?: number;
+  onOpen: () => void;
+  onMenu: () => void;
+  onRate: (star: number) => void;
+}) {
+  const title = meta.title ?? prettyName(book.name);
+  const bits = [title];
+  if (meta.author) bits.push(meta.author);
+  if (finishedAt) bits.push(`finished ${formatFinishedDate(finishedAt)}`);
+  if (meta.rating != null) bits.push(`rated ${meta.rating} out of 5`);
+  return (
+    <Tap haptic onPress={onOpen} onMenu={onMenu} accessibilityLabel={bits.join(', ')} accessibilityHint="Long press for options"
+      hoverStyle={{ backgroundColor: C.hover, borderRadius: R.lg }}
+      style={{ flexDirection: 'row', alignItems: 'center', gap: 14, padding: 10, borderRadius: R.lg, backgroundColor: C.surface, marginBottom: 8 }}>
+      <Cover title={book.name} uri={meta.cover} size={56} radius={R.sm} />
+      <View style={{ flex: 1, gap: 3 }}>
+        <Text numberOfLines={1} style={[T.title, { fontSize: 15 }]}>{title}</Text>
+        {meta.author || finishedAt ? (
+          <Text numberOfLines={1} style={T.small}>
+            {[meta.author, finishedAt ? `Finished ${formatFinishedDate(finishedAt)}` : ''].filter(Boolean).join(' · ')}
+          </Text>
+        ) : null}
+        {/* Each star is wider than its glyph, for the finger; pull the row left so the first lines up with the text. */}
+        <View style={{ marginLeft: -8, marginTop: -4, marginBottom: -6 }}>
+          <Stars rating={meta.rating} onRate={onRate} />
+        </View>
+      </View>
+      <Tap onPress={(e) => { e.stopPropagation(); onMenu(); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Options for ${title}`} style={{ padding: 6 }}>
+        <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
+      </Tap>
+    </Tap>
+  );
+}
+
+/** Five stars showing a 0.5–5 rating; a tap on one sets the rating through the shelf rule. */
+function Stars({ rating, onRate }: { rating?: number; onRate: (star: number) => void }) {
+  return (
+    <View style={{ flexDirection: 'row' }}>
+      {[1, 2, 3, 4, 5].map((n) => {
+        const name: IconName = rating != null && rating >= n ? 'star' : rating != null && rating >= n - 0.5 ? 'star-half' : 'star-outline';
+        return (
+          <Tap key={n} onPress={(e) => { e.stopPropagation(); onRate(n); }} hitSlop={4} scaleTo={0.82}
+            accessibilityLabel={`Rate ${n} star${n === 1 ? '' : 's'}`}
+            style={{ width: 36, height: 40, alignItems: 'center', justifyContent: 'center' }}>
+            <Ionicons name={name} size={20} color={name === 'star-outline' ? C.faint : C.accent} />
+          </Tap>
+        );
+      })}
     </View>
   );
 }

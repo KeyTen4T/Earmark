@@ -3,7 +3,7 @@ import { AppState } from 'react-native';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer } from 'expo-audio';
 import { TBTorrent, TBFile, chapterList, chapterTitle, getStreamUrl } from '../torbox';
-import { loadProgress, saveProgress, loadSettings, saveSettings, BookMeta } from '../storage';
+import { loadProgress, saveProgress, saveMeta, loadSettings, saveSettings, BookMeta } from '../storage';
 import { prettyName } from '../theme';
 import { syncProgress } from '../hardcover';
 import { syncNow, syncAfterProgress, onSyncApplied } from '../sync';
@@ -89,6 +89,9 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   // and the 2 h link-TTL reload must leave it alone.
   const localChapter = useRef(false);
   const lastSave = useRef(0);
+  // Whether the loaded book was already finished when it was opened, so persist() can tell a real
+  // finish (or a re-listen from the start) from a status tick that merely reports the end.
+  const finishedRef = useRef<{ id: number; done: boolean }>({ id: 0, done: false });
   const sleepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadToken = useRef(0);
 
@@ -262,6 +265,11 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     lastSave.current = now;
     const lastChapter = c.index === c.chapters.length - 1;
     const finished = lastChapter && c.duration > 0 && c.position >= c.duration - 2;
+    // A real change of finished state stamps or clears the finish date on the book's metadata. It
+    // only fires on the transition, so a book already finished on open keeps its stored date.
+    const wasDone = finishedRef.current.id === c.book.id && finishedRef.current.done;
+    if (c.book.hash && finished !== wasDone) void saveMeta(c.book.hash, { finishedAt: finished ? now : undefined });
+    finishedRef.current = { id: c.book.id, done: finished };
     void saveProgress(c.book.id, {
       fileId: c.chapters[c.index].id,
       chapterIndex: c.index,
@@ -504,6 +512,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const chapters = chapterList(book);
     if (!chapters.length) { patch({ error: 'No audio files in this torrent' }); return; }
     const saved = (await loadProgress())[String(book.id)];
+    finishedRef.current = { id: book.id, done: !!saved?.finished };
     let idx = opts.chapter ?? 0;
     let start = 0;
     if (opts.chapter === undefined && saved && !saved.finished) {

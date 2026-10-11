@@ -175,3 +175,28 @@ test('readalong: a future top-level key is still preserved as unknown', () => {
   const merged = mergeDocs(mk({ future: { a: 1 } }), mk({ future: { a: 2 } }));
   assert.deepEqual((merged as any).future, { a: 2 });
 });
+
+test('meta: parse keeps a rating and a finish date, and drops junk ones', () => {
+  const parsed = parseDoc({
+    ...emptyDoc(),
+    meta: {
+      h: { value: { title: 'Dune', rating: 4.5, finishedAt: 1700000000000 }, updated: 5 },
+      junk: { value: { rating: '4', finishedAt: -1 }, updated: 5 },
+    },
+  });
+  assert.equal(parsed.meta.h.value?.rating, 4.5);
+  assert.equal(parsed.meta.h.value?.finishedAt, 1700000000000);
+  assert.equal(parsed.meta.junk.value?.rating, undefined);
+  assert.equal(parsed.meta.junk.value?.finishedAt, undefined);
+});
+
+test('meta: a newer rating wins the merge, and clearing it survives', () => {
+  const a = mk({ meta: { h: { value: { title: 'Dune', rating: 3 }, updated: 10 } } });
+  const b = mk({ meta: { h: { value: { title: 'Dune', rating: 4.5, finishedAt: 1700000000000 }, updated: 20 } } });
+  assert.equal(mergeDocs(a, b).meta.h.value?.rating, 4.5);
+  assert.equal(mergeDocs(b, a).meta.h.value?.rating, 4.5);
+  // A newer record without the fields is a clear: both disappear from the merge.
+  const cleared = mk({ meta: { h: { value: { title: 'Dune' }, updated: 30 } } });
+  assert.equal(mergeDocs(b, cleared).meta.h.value?.rating, undefined);
+  assert.equal(mergeDocs(b, cleared).meta.h.value?.finishedAt, undefined);
+});

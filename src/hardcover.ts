@@ -215,3 +215,25 @@ export async function syncProgress(torrentId: number, spot: Spot, finished: bool
     inflight.delete(torrentId);
   }
 }
+
+/**
+ * Pushes the user's own rating (0.5–5 half steps, or null to clear) to a linked book's `user_book`.
+ * Unlinked books are local-only. Failures are reported like a progress sync and never block the
+ * local rating. Note: this mutation is written from Hardcover's published schema and has not been run
+ * against the API by the author.
+ */
+export async function syncRating(torrentId: number, rating: number | null) {
+  if (!(await getHcToken())) return;
+  const link = await getLink(torrentId);
+  if (!link) return;
+  try {
+    const r = await gql<{ update_user_book: { id: number; error?: string } }>(
+      `mutation R($id: Int!, $r: numeric) { update_user_book(id: $id, object: { rating: $r }) { id error } }`,
+      { id: link.userBookId, r: rating });
+    if (r.update_user_book?.error) throw new Error(r.update_user_book.error);
+    setSyncError(null);
+  } catch (e: any) {
+    console.warn('Hardcover rating sync failed', e);
+    setSyncError(e?.message ?? 'Hardcover rating sync failed');
+  }
+}

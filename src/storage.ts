@@ -104,7 +104,9 @@ export const bookFraction = (p?: Progress, sizes?: number[]) =>
 
 // ---- Book metadata (cover/author) remembered from search, keyed by info-hash ----
 // coverChecked: when a cover lookup last found nothing (ms), so it isn't repeated on every refresh.
-export type BookMeta = { title?: string; author?: string; narrator?: string; cover?: string; coverChecked?: number };
+// finishedAt: ms epoch the book was marked finished; cleared when it is un-finished. rating: the
+// user's own 0.5–5 half-star rating, or absent. Both ride the same meta stamp as the other fields.
+export type BookMeta = { title?: string; author?: string; narrator?: string; cover?: string; coverChecked?: number; finishedAt?: number; rating?: number };
 export const loadMeta = () => getJSON<Record<string, BookMeta>>('meta', {});
 export const saveMeta = (hash: string, m: BookMeta) => saveMetaMany({ [hash]: m });
 
@@ -137,7 +139,12 @@ export async function applyRemoteMeta(entries: { hash: string; value: BookMeta |
   for (const e of entries) {
     const key = e.hash.toLowerCase();
     if (e.value === null) delete all[key];
-    else all[key] = { ...all[key], ...e.value };
+    else {
+      // Fields the other device has no value for keep the local one (a cover found here, say), except
+      // the finish date and rating: those are cleared by hand, so the winning record decides them.
+      const { finishedAt: _f, rating: _r, ...kept } = all[key] ?? {};
+      all[key] = { ...kept, ...e.value };
+    }
     stamps.meta[key] = e.updated;
   }
   await setJSON('meta', all);

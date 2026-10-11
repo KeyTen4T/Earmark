@@ -17,7 +17,7 @@ export type ProgressRecord = {
   finished?: boolean;
 };
 
-export type MetaFields = { title?: string; author?: string; narrator?: string; cover?: string };
+export type MetaFields = { title?: string; author?: string; narrator?: string; cover?: string; finishedAt?: number; rating?: number };
 
 /** Mirrors CatalogBook in ../catalog; repeated here so merge stays dependency-free. */
 export type CatalogBook = {
@@ -79,6 +79,8 @@ function metaFields(v: Record<string, unknown>): MetaFields {
   if (typeof v.author === 'string') out.author = v.author;
   if (typeof v.narrator === 'string') out.narrator = v.narrator;
   if (typeof v.cover === 'string') out.cover = v.cover;
+  if (typeof v.finishedAt === 'number' && Number.isFinite(v.finishedAt) && v.finishedAt > 0) out.finishedAt = v.finishedAt;
+  if (typeof v.rating === 'number' && Number.isFinite(v.rating)) out.rating = v.rating;
   return out;
 }
 
