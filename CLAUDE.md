@@ -14,7 +14,11 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.11** (11 Oct), six additions, all run only in a browser with a fake library
+- **Current release: 1.3.12** (11 Oct): Discover → All audiobooks has a "Full cast" shelf
+  (`fullCastShelf`/`mergeFullCast` in `src/catalog.ts`; `cleanFullCastTitle` in `src/scrapers/cast.ts`
+  for "Search my sources"), and the sources search has a "Full cast" filter chip. The shelf was run in
+  a browser against Apple's real catalogue (164 books); the filter chip is covered by tests only.
+- **1.3.11** (11 Oct), six additions, all run only in a browser with a fake library
   unless noted:
   - Chapters inside a one-file book (`src/chapters/embedded.ts` pure parser for m4b `chpl` /
     QuickTime chapter track and MP3 ID3 `CHAP`; `src/chapters/fetch.ts` reads it with Range requests
