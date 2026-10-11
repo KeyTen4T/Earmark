@@ -14,7 +14,13 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.9** (11 Oct): Settings → Backup. Export writes one JSON file (`src/backup.ts`
+- **Current release: 1.3.10** (11 Oct): narrator preview. A cached source result's detail sheet has
+  "Preview narrator" (`src/preview.ts`: pure decisions plus a controller with injected TorBox calls;
+  wiring in `DiscoverScreen.tsx`). It adds the torrent, plays up to 75 s, and deletes it unless the
+  user taps Send to TorBox. It may delete only a torrent its own add returned, after an account
+  listing that did not contain the hash; keep that rule when changing it. Run in a browser against a
+  fake TorBox (add/stream/delete counted); never against the real one, and not on a phone.
+- **1.3.9** (11 Oct): Settings → Backup. Export writes one JSON file (`src/backup.ts`
   pure, `src/backup-io.ts` platform glue): the sync document plus the user's sources, the two
   addresses and the Hardcover links, never a secret. Import merges or replaces; Replace re-stamps
   restored records so the next sync pushes them. Progress has no tombstone in the sync format, so a
@@ -54,7 +60,6 @@ in the private `KeyTen4T/Earmark-private`.
   re-cloned from the public repo, never pushed. Still unchecked in the desktop app since 1.3.1: the
   grid filling the window, Escape closing dialogs then the player, the player bar's speed / sleep /
   chapters buttons, and the two confirmations (Remove from TorBox, Sign out).
-- **Ideas the user liked, not started**: narrator preview before adding.
 - **Looking at the app without touching TorBox**: `npx expo export --platform web --output-dir <tmp>`,
   add a `<script>` before the bundle in `index.html` that sets `localStorage['secret:torbox_api_key']`
   to a dummy value and replaces `fetch` for `api.torbox.app` (`/torrents/mylist` returns fake
