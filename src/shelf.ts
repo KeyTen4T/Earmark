@@ -28,6 +28,11 @@ export function bookFinishedAt(
   return undefined;
 }
 
+/** The finish date of a "read elsewhere" entry: its own `finishedAt`, and never an invented one. */
+export function entryFinishedAt(entry?: { finishedAt?: number }): number | undefined {
+  return realAt(entry?.finishedAt) ? entry!.finishedAt : undefined;
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** A finish date as "3 Oct", or '' for an undated book. The shelf adds the "Finished " prefix. */

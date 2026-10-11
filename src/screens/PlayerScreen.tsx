@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, Modal, FlatList, ScrollView, useWindowDimensions, ActivityIndicator, TextInput, Image, Animated, Platform, AppState } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -28,6 +28,7 @@ import { subscribeSyncStatus } from '../sync';
 import { useLayout } from '../layout';
 import { useEscape } from '../escape';
 import { playerPanes } from '../player/panes';
+import { CarMode } from './CarMode';
 import type { PlayerBarSheet } from '../components/Chrome';
 
 const RATES = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
@@ -128,6 +129,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
     setReadalongRecord((prev) => (prev && r && JSON.stringify(prev) === JSON.stringify(r) ? prev : r));
   const [artBox, setArtBox] = useState(0); // height left for the cover, measured below
   const [showText, setShowText] = useState(false);
+  const [carMode, setCarMode] = useState(false);
   const [, tick] = useState(0);
   const [appActive, setAppActive] = useState(AppState.currentState !== 'background');
   const readalong = readalongBridge();
@@ -136,6 +138,8 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
 
   // Escape closes this screen, but only when no Sheet inside it is on top of the escape stack.
   useEscape(onClose, visible);
+  // Closing the player closes car mode with it; a book swap meanwhile leaves car mode closed too.
+  useEffect(() => { if (!visible) setCarMode(false); }, [visible]);
   // A PlayerBar control asks for the player to open with one of its sheets already showing. On
   // desktop there is no chapters sheet: the chapters button focuses the right pane instead.
   useEffect(() => {
@@ -241,14 +245,15 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
 
   // The desktop split: what the right pane holds, or no second pane for a one-file book with no
   // read-along. Pure logic, in src/player/panes.ts so the test runner covers it.
-  const panes = playerPanes({ wide, chapterCount: p.chapters.length, hasReadalong: !!readalongRecord, showText });
+  const panes = playerPanes({ wide, chapterCount: p.chapterCount, hasReadalong: !!readalongRecord, showText });
   // The right pane's content and its heading. The title is the same text the chapters Sheet shows.
   const showingText = panes.right === 'text' && !!readalongRecord;
   // In the single column, reading puts the text above a compacted controls block. Never true in the
   // desktop two-pane split (that pane renders `controls(true)`, always full size).
   const reading = showText && !!readalongRecord;
   // Immersive reading is eligible only in the full player, with the text showing and no sheet open.
-  const chromeActive = visible && (reading || showingText) && sheet === null;
+  // Car mode is a separate full-screen layer, so the fade is suspended while it is up.
+  const chromeActive = visible && (reading || showingText) && sheet === null && !carMode;
   const { hidden: chromeHidden, collapsed: chromeCollapsed, opacity: chromeOpacity, poke: chromePoke, revealedAt } = useIdleChrome(chromeActive);
 
   // The touch that reveals the chrome must not also seek (paragraphs are tap-to-seek). `touchHidden`
@@ -302,7 +307,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   // The left pane stays a comfortable fixed width; the cover is scaled to fit it rather than filling it.
   const paneWidth = Math.min(430, Math.max(370, Math.round(windowWidth * 0.34)));
   const paneArt = Math.max(140, Math.min(paneWidth - 48, height * 0.42, 340));
-  const paneTitle = showingText ? 'Read along' : `${p.chapters.length} chapter${p.chapters.length === 1 ? '' : 's'}`;
+  const paneTitle = showingText ? 'Read along' : `${p.chapterCount} chapter${p.chapterCount === 1 ? '' : 's'}`;
 
   const readalongView = () => (
     <ReadalongView
@@ -334,10 +339,17 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
       <View style={{ alignItems: 'center', flex: 1 }}>
         <Text style={[T.label, { color: 'rgba(255,255,255,0.65)' }]}>Now playing</Text>
         <Text numberOfLines={1} style={{ color: C.text, fontWeight: '600', fontSize: 13, marginTop: 2 }}>
-          Chapter {p.index + 1} of {p.chapters.length}
+          Chapter {p.chapterIndex + 1} of {p.chapterCount}
         </Text>
       </View>
-      {desktop ? <View style={{ width: 42 }} /> : <IconButton label="Chapters" name="list" onPress={() => setSheet('chapters')} size={22} />}
+      {/* The car-mode entry sits with the Chapters button on the phone header's right; the desktop
+          bar has no car mode, so it stays a spacer to keep the two layouts' titles on the same line. */}
+      {desktop ? <View style={{ width: 42 }} /> : (
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <IconButton label="Car mode" name="car-sport-outline" onPress={() => setCarMode(true)} size={22} />
+          <IconButton label="Chapters" name="list" onPress={() => setSheet('chapters')} size={22} />
+        </View>
+      )}
     </View>
   );
 
@@ -384,7 +396,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
       ) : null}
 
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: compact ? 10 : 18, marginBottom: compact ? 14 : 26 }}>
-        <IconButton label="Previous chapter" name="play-skip-back" size={compact ? 22 : 26} onPress={() => (p.position > 5 ? p.seek(0) : p.goChapter(p.index - 1))} />
+        <IconButton label="Previous chapter" name="play-skip-back" size={compact ? 22 : 26} onPress={p.prevChapter} />
         <Tap onPress={() => p.skip(-p.skipBack)} haptic scaleTo={0.8} hitSlop={8} accessibilityLabel={`Skip back ${p.skipBack} seconds`} style={{ padding: 8 }}>
           <SkipIcon dir="back" seconds={p.skipBack} size={compact ? 28 : 34} />
         </Tap>
@@ -400,7 +412,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         <Tap onPress={() => p.skip(p.skipForward)} haptic scaleTo={0.8} hitSlop={8} accessibilityLabel={`Skip forward ${p.skipForward} seconds`} style={{ padding: 8 }}>
           <SkipIcon dir="forward" seconds={p.skipForward} size={compact ? 28 : 34} />
         </Tap>
-        <IconButton label="Next chapter" name="play-skip-forward" size={compact ? 22 : 26} disabled={p.index >= p.chapters.length - 1} onPress={() => p.goChapter(p.index + 1)} />
+        <IconButton label="Next chapter" name="play-skip-forward" size={compact ? 22 : 26} disabled={p.chapterIndex >= p.chapterCount - 1} onPress={p.nextChapter} />
       </View>
 
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
@@ -479,7 +491,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
           </Animated.View>
           <View style={{ flex: 1, marginTop: 10, paddingHorizontal: showingText ? 20 : 0 }}>
             {showingText ? readalongView() : (
-              <ChapterList onPick={(i) => p.goChapter(i)} scrollToken={chaptersSignal} style={{ flex: 1 }} />
+              <ChapterList onPick={(i) => p.pickChapter(i)} scrollToken={chaptersSignal} style={{ flex: 1 }} />
             )}
           </View>
         </View>
@@ -506,8 +518,8 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
           {twoPane ? splitBody : singleBody}
         </SafeAreaView>
 
-        <Sheet visible={sheet === 'chapters'} onClose={() => setSheet(null)} title={`${p.chapters.length} chapter${p.chapters.length === 1 ? '' : 's'}`}>
-          <ChapterList onPick={(i) => { p.goChapter(i); setSheet(null); }} />
+        <Sheet visible={sheet === 'chapters'} onClose={() => setSheet(null)} title={`${p.chapterCount} chapter${p.chapterCount === 1 ? '' : 's'}`}>
+          <ChapterList onPick={(i) => { p.pickChapter(i); setSheet(null); }} />
         </Sheet>
 
         <Sheet visible={sheet === 'speed'} onClose={() => setSheet(null)} title="Playback speed">
@@ -548,6 +560,8 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
           book={p.book} meta={p.meta} chapters={p.chapters} index={p.index} />
 
         {sheet === 'cover' && <CoverPicker visible onClose={() => setSheet(null)} book={p.book} meta={p.meta} onSaved={onMeta} />}
+
+        <CarMode visible={carMode} onClose={() => setCarMode(false)} />
       </View>
     </Modal>
   );
@@ -568,34 +582,47 @@ function Pill({ icon, label, onPress, active, accessibilityLabel }: { icon: any;
 function ChapterList({ onPick, scrollToken = 0, style }: { onPick: (i: number) => void; scrollToken?: number; style?: any }) {
   const p = usePlayer();
   const ref = useRef<FlatList>(null);
+  const embedded = p.embedded;
+  const current = embedded ? p.embeddedIndex : p.index;
   // The desktop bar's chapters button bumps `scrollToken` to bring the current chapter back into view
   // (the pane may already be open, where `initialScrollIndex` has long since been applied).
   useEffect(() => {
     if (!scrollToken) return;
-    ref.current?.scrollToIndex({ index: Math.max(0, p.index - 2), viewPosition: 0, animated: true });
+    ref.current?.scrollToIndex({ index: Math.max(0, current - 2), viewPosition: 0, animated: true });
   }, [scrollToken]);
+  // One row shape for both kinds of book: an embedded chapter's `start` within the file, or a file
+  // row. Built per chapter change only, not on every position tick.
+  const rows = useMemo(() => embedded
+    ? embedded.map((c, i) => ({ key: `e${i}`, title: c.title, size: 0, start: c.start, embedded: true }))
+    : p.chapters.map((c) => ({ key: String(c.id), title: chapterTitle(c), size: c.size, start: 0, embedded: false })),
+    [embedded, p.chapters]);
   return (
     <FlatList
       ref={ref}
       style={style}
-      data={p.chapters}
-      keyExtractor={(c) => String(c.id)}
-      initialScrollIndex={Math.max(0, p.index - 2)}
+      data={rows}
+      keyExtractor={(r) => r.key}
+      initialScrollIndex={Math.max(0, current - 2)}
       getItemLayout={(_d, i) => ({ length: 60, offset: 60 * i, index: i })}
       onScrollToIndexFailed={() => {}}
       renderItem={({ item, index }) => {
-        const cur = index === p.index;
-        const done = index < p.index;
+        const cur = index === current;
+        const done = index < current;
+        const length = item.embedded
+          ? (index + 1 < embedded!.length ? embedded![index + 1].start : Math.max(item.start, p.duration || item.start)) - item.start
+          : 0;
         return (
-          <Tap onPress={() => onPick(index)} scaleTo={0.99} accessibilityLabel={`${chapterTitle(item)}${cur ? ', current' : done ? ', finished' : ''}`} accessibilityState={{ selected: cur }} style={{ height: 60, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, backgroundColor: cur ? 'rgba(255,181,71,0.08)' : 'transparent' }}>
+          <Tap onPress={() => onPick(index)} scaleTo={0.99} accessibilityLabel={`${item.title}${cur ? ', current' : done ? ', finished' : ''}`} accessibilityState={{ selected: cur }} style={{ height: 60, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, backgroundColor: cur ? 'rgba(255,181,71,0.08)' : 'transparent' }}>
             <View style={{ width: 28, alignItems: 'center' }}>
               {cur ? <Ionicons name={p.playing ? 'volume-high' : 'pause'} size={18} color={C.accent} /> :
                 done ? <Ionicons name="checkmark-circle" size={18} color={C.faint} /> :
                   <Text style={{ color: C.faint, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{index + 1}</Text>}
             </View>
             <View style={{ flex: 1 }}>
-              <Text numberOfLines={1} style={{ color: cur ? C.accent : done ? C.sub : C.text, fontWeight: cur ? '700' : '500', fontSize: 15 }}>{chapterTitle(item)}</Text>
-              <Text style={T.small}>{cur && p.duration ? `${fmtTime(p.position)} / ${fmtTime(p.duration)}` : formatBytes(item.size)}</Text>
+              <Text numberOfLines={1} style={{ color: cur ? C.accent : done ? C.sub : C.text, fontWeight: cur ? '700' : '500', fontSize: 15 }}>{item.title}</Text>
+              <Text style={T.small}>{item.embedded
+                ? (cur ? `${fmtTime(p.position - item.start)} / ${fmtTime(length)}` : fmtTime(length))
+                : (cur && p.duration ? `${fmtTime(p.position)} / ${fmtTime(p.duration)}` : formatBytes(item.size))}</Text>
             </View>
           </Tap>
         );

@@ -1,20 +1,25 @@
-// Platform glue for backups: read the device into a BackupFile, save one to a file, and apply one
-// back. The file's shape and all the merge/replace logic live in ./backup (pure). Nothing here
-// touches secure storage: no key, token or secret is read or written.
+// Platform glue for backups and setup files: read the device into a file, save one, and apply one
+// back. The shapes and all the merge/replace logic live in ./backup (pure). Nothing here touches
+// secure storage: no key, token or secret is read or written.
 import * as DocumentPicker from 'expo-document-picker';
 import * as FS from 'expo-file-system';
 import * as LegacyFS from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import app from '../app.json';
-import { buildBackup, mergeBackupData, parseBackupText, type BackupData, type BackupFile } from './backup';
+import {
+  buildBackup, buildSetup, mergeBackupData, mergeSetupData, parseImportFileText,
+  type BackupData, type BackupFile, type ImportFile, type SetupData, type SetupFile,
+} from './backup';
 import { applyBackupSync, buildLocalDoc } from './sync';
 import {
   loadUserScrapers, saveUserScrapers, loadDisabled, saveDisabled,
   loadEbookSearchUrl, saveEbookSearchUrl, loadReadalongServerUrl, saveReadalongServerUrl,
+  loadFavNarrators, saveFavNarrators,
+  loadReadElsewhere, saveReadElsewhere,
 } from './storage';
 import { loadHcLinks, saveHcLinks, type HcLink } from './hardcover';
 
-async function readText(uri: string): Promise<string> {
+export async function readText(uri: string): Promise<string> {
   const fs: any = FS;
   try {
     if (typeof fs.File === 'function') {
@@ -32,21 +37,29 @@ async function readText(uri: string): Promise<string> {
 
 /** Everything on this device that a backup covers. */
 async function deviceData(): Promise<BackupData> {
-  const [sync, sources, disabled, ebookSearchUrl, readalongServerUrl, hardcoverLinks] = await Promise.all([
-    buildLocalDoc(), loadUserScrapers(), loadDisabled(), loadEbookSearchUrl(), loadReadalongServerUrl(), loadHcLinks(),
+  const [sync, sources, disabled, ebookSearchUrl, readalongServerUrl, hardcoverLinks, narrators, readElsewhere] = await Promise.all([
+    buildLocalDoc(), loadUserScrapers(), loadDisabled(), loadEbookSearchUrl(), loadReadalongServerUrl(), loadHcLinks(), loadFavNarrators(), loadReadElsewhere(),
   ]);
-  return { sync, sources, disabled, ebookSearchUrl, readalongServerUrl, hardcoverLinks };
+  return { sync, sources, disabled, ebookSearchUrl, readalongServerUrl, hardcoverLinks, narrators, readElsewhere };
 }
 
 export async function makeBackupFile(): Promise<BackupFile> {
   return buildBackup(await deviceData(), app.expo.version);
 }
 
-/** Opens the document picker and parses the chosen backup; null if the user cancelled. */
-export async function pickBackupFile(): Promise<BackupFile | null> {
+/** The small file Share my setup saves: the user's sources, the disabled ids and the EPUB search address. */
+export async function makeSetupFile(): Promise<SetupFile> {
+  const [sources, disabled, ebookSearchUrl] = await Promise.all([
+    loadUserScrapers(), loadDisabled(), loadEbookSearchUrl(),
+  ]);
+  return buildSetup({ sources, disabled, ebookSearchUrl }, app.expo.version);
+}
+
+/** Opens the document picker and parses the chosen backup or setup file; null if the user cancelled. */
+export async function pickImportFile(): Promise<ImportFile | null> {
   const res = await DocumentPicker.getDocumentAsync({ type: ['application/json', 'text/plain', '*/*'], multiple: false, copyToCacheDirectory: true });
   if (res.canceled || !res.assets?.length) return null;
-  return parseBackupText(await readText(res.assets[0].uri));
+  return parseImportFileText(await readText(res.assets[0].uri));
 }
 
 /**
@@ -64,6 +77,26 @@ export async function applyBackupFile(file: BackupFile, mode: 'merge' | 'replace
   await saveEbookSearchUrl(next.ebookSearchUrl);
   await saveReadalongServerUrl(next.readalongServerUrl);
   await saveHcLinks(next.hardcoverLinks as Record<string, HcLink>);
+  await saveFavNarrators(next.narrators);
+  await saveReadElsewhere(next.readElsewhere);
+  return next;
+}
+
+/**
+ * Applies a setup file: adds sources that are not already here, leaves existing sources and the
+ * disabled list alone, and fills the EPUB search address only when this device has none. Returned so
+ * the caller can refresh in-memory state.
+ */
+export async function applySetupFile(file: SetupFile): Promise<SetupData> {
+  const device: SetupData = {
+    sources: await loadUserScrapers(),
+    disabled: await loadDisabled(),
+    ebookSearchUrl: await loadEbookSearchUrl(),
+  };
+  const next = mergeSetupData(device, file.data);
+  await saveUserScrapers(next.sources);
+  await saveDisabled(next.disabled);
+  await saveEbookSearchUrl(next.ebookSearchUrl);
   return next;
 }
 
@@ -74,14 +107,14 @@ function stampNow(): string {
 }
 
 /**
- * Saves the backup. Web/desktop downloads a Blob through a temporary link (Electron's
+ * Saves a backup or a setup file. Web/desktop downloads a Blob through a temporary link (Electron's
  * setWindowOpenHandler only sees window.open, and will-navigate only fires for top-level
  * navigations, so neither swallows an <a download> click). Android uses the Storage Access
  * Framework directory picker and creates the file in the chosen folder.
  */
-export async function exportBackupFile(file: BackupFile): Promise<'saved' | 'canceled'> {
+export async function exportBackupFile(file: ImportFile): Promise<'saved' | 'canceled'> {
   const json = JSON.stringify(file, null, 2);
-  const name = `earmark-backup-${stampNow()}`;
+  const name = `earmark-${file.kind === 'setup' ? 'setup' : 'backup'}-${stampNow()}`;
   if (Platform.OS === 'web') {
     const doc = (globalThis as any).document;
     const blob = new (globalThis as any).Blob([json], { type: 'application/json' });

@@ -91,3 +91,55 @@ export function summary(notes: unknown, maxLines: number): string {
   }
   return lines.join('\n');
 }
+
+/** A block of release notes rendered by the "what's new" sheet. */
+export type NoteBlock =
+  | { kind: 'label'; text: string }
+  | { kind: 'para'; text: string }
+  | { kind: 'bullet'; lead: string; text: string };
+
+const stripTicks = (s: string) => s.replace(/`/g, '');
+
+/**
+ * Turns a release's markdown-ish notes into simple blocks. Bold lines (`**New**`) and markdown
+ * headings become section labels; `-`/`*` lines become bullets, with a leading `**bold**` split out
+ * as the bullet's emphasised lead; everything else is a paragraph. Backticks are stripped. Reading
+ * stops at the Install or Notes heading: neither belongs in a what's-new sheet.
+ */
+export function notesToBlocks(notes: unknown): NoteBlock[] {
+  if (typeof notes !== 'string') return [];
+  const out: NoteBlock[] = [];
+  for (const raw of notes.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    const heading = /^(?:\*\*(.+?)\*\*|#{1,6}\s+(.+?))\s*$/.exec(line);
+    if (heading) {
+      const label = (heading[1] ?? heading[2] ?? '').trim();
+      if (/^(install|notes)$/i.test(label)) break;
+      if (label) out.push({ kind: 'label', text: label });
+      continue;
+    }
+
+    const bullet = /^[-*•]\s+(.*)$/.exec(line);
+    if (bullet) {
+      const body = stripTicks(bullet[1]).trim();
+      const lead = /^\*\*(.+?)\*\*\s*(.*)$/.exec(body);
+      out.push(lead ? { kind: 'bullet', lead: stripTicks(lead[1]).trim(), text: stripTicks(lead[2]).trim() }
+                    : { kind: 'bullet', lead: '', text: body });
+      continue;
+    }
+
+    out.push({ kind: 'para', text: stripTicks(line).replace(/\*\*/g, '').trim() });
+  }
+  return out;
+}
+
+/**
+ * What to do with a version's release notes on start: record the version on a first launch, do
+ * nothing when it is unchanged, and show its notes when it differs from the one that last ran.
+ */
+export function whatsNewDecision(stored: string | null | undefined, current: string): 'record' | 'none' | 'show' {
+  if (!stored) return 'record';
+  return stored === current ? 'none' : 'show';
+}

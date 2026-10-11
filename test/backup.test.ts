@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyDoc, SYNC_VERSION } from '../src/sync/merge';
 import {
-  BACKUP_VERSION, SECRET_KEYS, buildBackup, parseBackup, parseBackupText, backupSummary, mergeBackupData, replaceDoc,
-  type BackupData,
+  BACKUP_VERSION, SETUP_VERSION, SECRET_KEYS, buildBackup, buildSetup, parseBackup, parseBackupText,
+  parseSetup, parseImportFile, parseImportFileText, backupSummary, setupSummary, mergeBackupData, mergeSetupData,
+  replaceDoc, type BackupData, type SetupData,
 } from '../src/backup';
 
 const src = (id: string, headers: Record<string, string> = {}): any => ({
@@ -22,6 +23,8 @@ const data = (over: Partial<BackupData> = {}): BackupData => ({
   ebookSearchUrl: 'https://ebooks.example/search',
   readalongServerUrl: 'https://readalong.example/api',
   hardcoverLinks: { '7': { bookId: 1, title: 'Dune' } },
+  narrators: ['Scott Brick'],
+  readElsewhere: [],
   ...over,
 });
 
@@ -109,8 +112,44 @@ test('backup merge: newest record wins, sources added by id, blanks filled only 
   assert.deepEqual([...m.disabled].sort(), ['a', 'c']);
 });
 
-test('backup replace: file records re-stamped, device-only records tombstoned', () => {
-  const device = {
+test('backup: narrators ride a backup, parse tolerantly, union on Merge and take the file on Replace', () => {
+  // A backup from before this feature has no list, and one with junk in it keeps only real names.
+  assert.deepEqual(parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { sync: {} } }).data.narrators, []);
+  assert.deepEqual(parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { narrators: 'nope' } }).data.narrators, []);
+  assert.deepEqual(parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { narrators: ['A', 1, '  '] } }).data.narrators, ['A']);
+
+  const file = buildBackup(data({ narrators: ['J. Smith', 'Scott Brick'] }), '1.3.11');
+  assert.deepEqual(parseBackupText(JSON.stringify(file)).data.narrators, ['J. Smith', 'Scott Brick']);
+
+  // Merge unions by normalised name, keeping the device's own spelling first.
+  const merged = mergeBackupData(data({ narrators: ['J Smith', 'Orlagh Cassidy'] }), file.data);
+  assert.deepEqual(merged.narrators, ['J Smith', 'Orlagh Cassidy', 'Scott Brick']);
+});
+
+test('backup: read-elsewhere entries ride a backup, parse tolerantly and merge by id', () => {
+  // A backup from before this feature has none, and junk entries are dropped rather than guessed at.
+  assert.deepEqual(parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { sync: {} } }).data.readElsewhere, []);
+  assert.deepEqual(parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { sync: {}, readElsewhere: 'nope' } }).data.readElsewhere, []);
+  assert.deepEqual(
+    parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { sync: {}, readElsewhere: [
+      { id: 'x' }, { id: 'y', source: 'hardcover', title: 'The Quiet Machine' }, 7,
+      { id: 'z', source: 'goodreads', title: 'Another', rating: 0, finishedAt: 0 },
+    ] } }).data.readElsewhere,
+    [{ id: 'y', source: 'hardcover', title: 'The Quiet Machine' }, { id: 'z', source: 'goodreads', title: 'Another' }],
+  );
+
+  const entry = (id: string, title: string): any => ({ id, source: 'goodreads', title });
+  const file = buildBackup(data({ readElsewhere: [entry('gr:1', 'Mine')] }), '1.3.11');
+  assert.deepEqual(parseBackupText(JSON.stringify(file)).data.readElsewhere, [entry('gr:1', 'Mine')]);
+
+  // Merge keeps the device's entry where it has one and only adds the file's new ids.
+  const device = data({ readElsewhere: [entry('gr:1', 'Device'), entry('gr:2', 'Keep')] });
+  const merged = mergeBackupData(device, { ...data(), readElsewhere: [entry('gr:1', 'File'), entry('gr:3', 'New')] });
+  assert.deepEqual(merged.readElsewhere.map((e) => e.id), ['gr:1', 'gr:2', 'gr:3']);
+  assert.equal(merged.readElsewhere.find((e) => e.id === 'gr:1')?.title, 'Device');
+});
+
+test('backup replace: file records re-stamped, device-only records tombstoned', () => {  const device = {
     ...emptyDoc(),
     progress: { keep: prog(1), gone: prog(2) },
     meta: { h1: { value: { title: 'On device' }, updated: 5 }, h2: { value: { title: 'Only here' }, updated: 5 } },
@@ -141,4 +180,68 @@ test('backup: Replace keeps the finish date of a book that only had its progress
   const out = replaceDoc(file, file, 9000);
   assert.equal(out.progress.aa.updated, 9000);
   assert.equal(out.meta.aa.value?.finishedAt, 5000);
+});
+
+const setupData = (over: Partial<SetupData> = {}): SetupData => ({
+  sources: [src('a')],
+  disabled: ['a'],
+  ebookSearchUrl: 'https://ebooks.example/search',
+  ...over,
+});
+
+test('setup: build -> JSON -> parse round trips with kind setup', () => {
+  const file = buildSetup(setupData({ sources: [src('a'), src('b')] }), '1.3.10', 1700000000000);
+  assert.equal(file.app, 'earmark');
+  assert.equal(file.kind, 'setup');
+  assert.equal(file.version, SETUP_VERSION);
+  assert.deepEqual(parseSetup(file), file);
+  assert.deepEqual(parseImportFileText(JSON.stringify(file)), file);
+});
+
+test('setup: never carries progress, book details, ratings, read-alongs, links or secrets', () => {
+  // The device has all of these; the setup file is built only from sources, disabled and the search address.
+  const device = data({
+    sync: { ...emptyDoc(), progress: { h1: prog(1) }, meta: { h: { value: { title: 'X', rating: 5 }, updated: 1 } },
+      readalong: { r: { value: {}, updated: 1 } } },
+  });
+  const file = buildSetup({ sources: device.sources, disabled: device.disabled, ebookSearchUrl: device.ebookSearchUrl }, '1.3.10');
+  assert.deepEqual(Object.keys(file.data).sort(), ['disabled', 'ebookSearchUrl', 'sources']);
+  const text = JSON.stringify(file);
+  for (const gone of ['"sync"', '"progress"', '"readalong"', '"hardcoverLinks"', '"readalongServerUrl"', '"rating"', '"finished"', '"narrators"']) {
+    assert.ok(!text.includes(gone), `leaked ${gone}`);
+  }
+  for (const k of SECRET_KEYS) assert.ok(!text.includes(k), `leaked ${k}`);
+});
+
+test('setup: summary counts the sources and says whether a search address is in it', () => {
+  assert.deepEqual(setupSummary(buildSetup(setupData({ sources: [src('a'), src('b')] }), '1.3.10')), { sources: 2, search: true });
+  assert.deepEqual(setupSummary(buildSetup(setupData({ ebookSearchUrl: '' }), '1.3.10')), { sources: 1, search: false });
+});
+
+test('setup merge: adds unknown sources only, leaves disabled and an existing search address alone', () => {
+  const device = setupData({ sources: [{ ...src('a'), name: 'Mine' }], disabled: ['a'], ebookSearchUrl: 'https://device.example/search' });
+  const file = setupData({ sources: [{ ...src('a'), name: 'Theirs' }, src('c')], disabled: ['c'], ebookSearchUrl: 'https://file.example/search' });
+  const m = mergeSetupData(device, file);
+  assert.deepEqual(m.sources.map((s) => s.id), ['a', 'c']);
+  assert.equal(m.sources.find((s) => s.id === 'a')?.name, 'Mine'); // existing source untouched
+  assert.deepEqual(m.disabled, ['a']); // disabled list left alone
+  assert.equal(m.ebookSearchUrl, 'https://device.example/search'); // kept when this device has one
+  assert.equal(mergeSetupData({ ...device, ebookSearchUrl: '' }, file).ebookSearchUrl, 'https://file.example/search');
+});
+
+test('import: a backup still parses as a backup', () => {
+  const file = parseImportFile(buildBackup(data(), '1.3.10'));
+  assert.equal(file.kind, 'backup');
+  if (file.kind === 'backup') {
+    assert.equal(file.data.ebookSearchUrl, 'https://ebooks.example/search');
+    assert.deepEqual(backupSummary(file).sources, 1);
+  }
+});
+
+test('import: a setup file parses as one, and an unknown kind is rejected readably', () => {
+  const file = parseImportFile(buildSetup(setupData(), '1.3.10'));
+  assert.equal(file.kind, 'setup');
+  assert.throws(() => parseImportFile({ app: 'earmark', kind: 'notes', data: {} }), /not an Earmark backup or setup/i);
+  assert.throws(() => parseImportFile({ app: 'other', kind: 'setup', data: {} }), /not an Earmark/i);
+  assert.throws(() => parseImportFileText('not json'), /Not valid JSON/);
 });

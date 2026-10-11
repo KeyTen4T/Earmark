@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, paletteFor, fmtApprox, prettyName } from '../theme';
 import { Tap, Cover, Bar, Chip, ChipRow, Sheet, Empty, Button, IconButton, toast, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, confirmAction, type IconName } from '../components/ui';
 import { TBTorrent, isReady, isStuck, chapterList, addMagnet, deleteTorrent } from '../torbox';
-import { Progress, BookMeta, bookFraction, loadHiddenBooks, saveHiddenBooks, saveMeta, saveProgress } from '../storage';
+import { Progress, BookMeta, bookFraction, loadHiddenBooks, saveHiddenBooks, saveMeta, saveProgress, saveReadElsewhere, removeReadElsewhere } from '../storage';
 import { remainingBookSeconds } from '../book-math';
 import { onSyncApplied, syncAfterProgress } from '../sync';
 import { formatBytes } from '../scrapers/template';
@@ -18,8 +18,9 @@ import { torrentToMagnet } from '../scrapers/bencode';
 import { getDownloads, subscribeDownloads, queueBook, pauseDownload, resumeDownload, removeDownload } from '../downloads';
 import { progressFraction, isComplete, type DownloadBook, type Downloads } from '../downloads/state';
 import { matchesLibrarySearch } from '../library-search';
-import { bookFinishedAt, formatFinishedDate, ratingAfterTap, shelfGroups } from '../shelf';
+import { bookFinishedAt, entryFinishedAt, formatFinishedDate, ratingAfterTap, shelfGroups } from '../shelf';
 import { syncRating } from '../hardcover';
+import type { ReadElsewhere } from '../reading-history';
 
 type Filter = 'all' | 'listening' | 'new' | 'done';
 
@@ -28,6 +29,7 @@ export function LibraryScreen(props: {
   books: TBTorrent[];
   progress: Record<string, Progress>;
   meta: Record<string, BookMeta>;
+  readElsewhere: ReadElsewhere[];
   refreshing: boolean;
   loaded: boolean;
   lastBookId?: number;
@@ -38,6 +40,7 @@ export function LibraryScreen(props: {
   onOpen: (b: TBTorrent) => void;
   onMeta: (all: Record<string, BookMeta>) => void;
   onProgress: (all: Record<string, Progress>) => void;
+  onReadElsewhere: (list: ReadElsewhere[]) => void;
   goDiscover: () => void;
 }) {
   const { progress, meta, refreshing, refresh, onOpen } = props;
@@ -54,6 +57,7 @@ export function LibraryScreen(props: {
   const [addOpen, setAddOpen] = useState(false);
   useEffect(() => { if (props.addRequest) setAddOpen(true); }, [props.addRequest]);
   const [menu, setMenu] = useState<TBTorrent | null>(null);
+  const [elsewhereMenu, setElsewhereMenu] = useState<ReadElsewhere | null>(null);
   const [coverFor, setCoverFor] = useState<TBTorrent | null>(null);
   const [editFor, setEditFor] = useState<TBTorrent | null>(null);
   const [showStuck, setShowStuck] = useState(false);
@@ -134,6 +138,22 @@ export function LibraryScreen(props: {
     void syncRating(b.id, next ?? null);
   };
 
+  // A "read elsewhere" entry's rating lives only in the device-local shelf list; the tap rule is the
+  // same as a library book's, but nothing is pushed anywhere.
+  const rateElsewhere = async (e: ReadElsewhere, star: number) => {
+    const next = ratingAfterTap(e.rating, star);
+    const updated = props.readElsewhere.map((x) => (x.id === e.id ? { ...x, rating: next } : x));
+    await saveReadElsewhere(updated);
+    props.onReadElsewhere(updated);
+  };
+  // Removes the entry and remembers its id, so a later import does not bring it back.
+  const removeElsewhere = async (e: ReadElsewhere) => {
+    setElsewhereMenu(null);
+    await removeReadElsewhere(e.id);
+    props.onReadElsewhere(props.readElsewhere.filter((x) => x.id !== e.id));
+    toast('Removed from shelf');
+  };
+
   const ready = shelf.filter(isReady);
   const downloading = shelf.filter((b) => !isReady(b) && !isStuck(b));
   const stuck = shelf.filter(isStuck);
@@ -172,9 +192,21 @@ export function LibraryScreen(props: {
   // The search narrows whatever the chip already selected; titles, authors and narrators all match.
   const q = query.trim();
   const shown = q ? filtered.filter((b) => matchesLibrarySearch(b.name, meta[b.hash?.toLowerCase()], q)) : filtered;
-  // The Finished chip shows the shelf instead of the grid: finished books with their date and rating.
-  const shelfBooks = shown.map((book) => ({ book, finishedAt: bookFinishedAt(meta[book.hash?.toLowerCase() ?? ''], progress[book.id]) }));
-  const finishedGroups = shelfGroups(shelfBooks);
+  // The Finished chip shows the shelf: finished library books and "read elsewhere" entries together,
+  // in the same year groups. Elsewhere entries appear only here, never in the other filters or counts.
+  type FinishedItem =
+    | { kind: 'book'; book: TBTorrent; finishedAt?: number }
+    | { kind: 'elsewhere'; entry: ReadElsewhere; finishedAt?: number };
+  const bookItems: FinishedItem[] = shown.map((book) => ({
+    kind: 'book', book, finishedAt: bookFinishedAt(meta[book.hash?.toLowerCase() ?? ''], progress[book.id]),
+  }));
+  const entryItems: FinishedItem[] = filter === 'done'
+    ? props.readElsewhere
+        .filter((e) => !q || `${e.title} ${e.author ?? ''}`.toLowerCase().includes(q.toLowerCase()))
+        .map((entry) => ({ kind: 'elsewhere', entry, finishedAt: entryFinishedAt(entry) }))
+    : [];
+  const finishedItems = [...bookItems, ...entryItems];
+  const finishedGroups = shelfGroups(finishedItems);
 
   // Two covers across on a phone; on desktop as many ~190px covers as fit. Measure the grid instead
   // of trusting contentWidth: the screen's own scrollbar takes a slice of the width it reports, so
@@ -207,7 +239,7 @@ export function LibraryScreen(props: {
               {[0, 1, 2, 3].map((i) => <Skeleton key={i} width={col} height={col} style={{ marginBottom: 8 }} />)}
             </View>
           </View>
-        ) : books.length === 0 ? (
+        ) : books.length === 0 && props.readElsewhere.length === 0 ? (
           <Empty icon="headset-outline" title="Nothing on the shelf yet"
             body="Find a book in Discover, or add a magnet link with the + button. Anything with audio files in your TorBox shows up here."
             action={<Button label="Discover books" icon="search" onPress={props.goDiscover} />} />
@@ -309,7 +341,7 @@ export function LibraryScreen(props: {
             </ChipRow>
 
             {filter === 'done' ? (
-              shown.length === 0 ? (
+              finishedItems.length === 0 ? (
                 <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'No finished books yet.'}</Text>
               ) : (
                 <View style={{ paddingHorizontal: 20, maxWidth: wide ? 720 : undefined }}>
@@ -317,12 +349,18 @@ export function LibraryScreen(props: {
                     <View key={g.year ?? 'earlier'} style={{ marginBottom: 22 }}>
                       <Text style={[T.label, { marginBottom: 10 }]}>{g.label}</Text>
                       {g.books.map((e, i) => (
-                        <FadeIn key={e.book.id} index={i} delay={80}>
-                          <FinishedRow book={e.book} meta={m(e.book)} finishedAt={e.finishedAt}
-                            onOpen={() => { onOpen(e.book); player.open(e.book, m(e.book), { autoplay: true }); }}
-                            onMenu={() => setMenu(e.book)}
-                            onRate={(star) => rate(e.book, star)} />
-                        </FadeIn>
+                        e.kind === 'book' ? (
+                          <FadeIn key={`b${e.book.id}`} index={i} delay={80}>
+                            <FinishedRow book={e.book} meta={m(e.book)} finishedAt={e.finishedAt}
+                              onOpen={() => { onOpen(e.book); player.open(e.book, m(e.book), { autoplay: true }); }}
+                              onMenu={() => setMenu(e.book)}
+                              onRate={(star) => rate(e.book, star)} />
+                          </FadeIn>
+                        ) : (
+                          <FadeIn key={e.entry.id} index={i} delay={80}>
+                            <ElsewhereRow entry={e.entry} onMenu={() => setElsewhereMenu(e.entry)} onRate={(star) => rateElsewhere(e.entry, star)} />
+                          </FadeIn>
+                        )
                       ))}
                     </View>
                   ))}
@@ -453,6 +491,15 @@ export function LibraryScreen(props: {
                 if (!(await confirmAction('Remove from TorBox?', `“${m(b).title ?? prettyName(b.name)}” will be deleted from your TorBox account. You would have to add it again to listen to it.`, 'Remove'))) return;
                 setMenu(null); remove(b);
               }} />
+          </View>
+        )}
+      </Sheet>
+
+      <Sheet visible={!!elsewhereMenu} onClose={() => setElsewhereMenu(null)} title={elsewhereMenu?.title ?? ''}>
+        {elsewhereMenu && (
+          <View style={{ paddingHorizontal: 20, gap: 10, paddingTop: 6 }}>
+            <Text style={T.small}>Read elsewhere · not in your TorBox library, so there is nothing to play.</Text>
+            <Button kind="danger" icon="trash-outline" label="Remove from shelf" onPress={() => void removeElsewhere(elsewhereMenu)} />
           </View>
         )}
       </Sheet>
@@ -597,6 +644,42 @@ function FinishedRow({ book, meta, finishedAt, onOpen, onMenu, onRate }: {
         </View>
       </View>
       <Tap onPress={(e) => { e.stopPropagation(); onMenu(); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Options for ${title}`} style={{ padding: 6 }}>
+        <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
+      </Tap>
+    </Tap>
+  );
+}
+
+/**
+ * One "read elsewhere" book on the finished shelf: the same shape as a library row, plus a small
+ * "Read elsewhere" label. Tapping the row does nothing (there is nothing to play); the stars and the
+ * options button still work.
+ */
+function ElsewhereRow({ entry, onMenu, onRate }: {
+  entry: ReadElsewhere;
+  onMenu: () => void;
+  onRate: (star: number) => void;
+}) {
+  const bits = [entry.title];
+  if (entry.author) bits.push(entry.author);
+  if (entry.finishedAt) bits.push(`finished ${formatFinishedDate(entry.finishedAt)}`);
+  if (entry.rating != null) bits.push(`rated ${entry.rating} out of 5`);
+  return (
+    <Tap onMenu={onMenu} accessibilityLabel={bits.join(', ')} accessibilityHint="Long press for options"
+      hoverStyle={{ backgroundColor: C.hover, borderRadius: R.lg }}
+      style={{ flexDirection: 'row', alignItems: 'center', gap: 14, padding: 10, borderRadius: R.lg, backgroundColor: C.surface, marginBottom: 8 }}>
+      <Cover title={entry.title} uri={entry.cover} size={56} radius={R.sm} />
+      <View style={{ flex: 1, gap: 3 }}>
+        <Text numberOfLines={1} style={[T.title, { fontSize: 15 }]}>{entry.title}</Text>
+        {/* The label shares the author line: beside the stars there is no room on a phone. */}
+        <Text numberOfLines={1} style={T.small}>
+          {[entry.author, entry.finishedAt ? `Read elsewhere ${formatFinishedDate(entry.finishedAt)}` : 'Read elsewhere'].filter(Boolean).join(' · ')}
+        </Text>
+        <View style={{ marginLeft: -8, marginTop: -4, marginBottom: -6 }}>
+          <Stars rating={entry.rating} onRate={onRate} />
+        </View>
+      </View>
+      <Tap onPress={(e) => { e.stopPropagation(); onMenu(); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Options for ${entry.title}`} style={{ padding: 6 }}>
         <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
       </Tap>
     </Tap>

@@ -70,6 +70,16 @@ test('shelf: books group by year, newest first, undated last', () => {
   assert.equal(groups[3].label, 'Earlier');
 });
 
+test('shelf: read-elsewhere entries group with library books and count in the year', () => {
+  const groups = shelfGroups([
+    { kind: 'book', finishedAt: at(2026, 9, 1) },
+    { kind: 'elsewhere', finishedAt: at(2026, 9, 5) },
+    { kind: 'elsewhere' },
+  ]);
+  assert.deepEqual(groups.map((g) => [g.year, g.count]), [[2026, 2], [null, 1]]);
+  assert.equal(groups[0].label, '2026 · 2 books');
+});
+
 test('shelf: the undated group keeps its input order and is absent when there are none', () => {
   const groups = shelfGroups([{ id: 1, finishedAt: at(2026, 5, 1) }]);
   assert.equal(groups.length, 1);

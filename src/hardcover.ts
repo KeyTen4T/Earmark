@@ -2,6 +2,7 @@
 // Docs: https://docs.hardcover.app/api/getting-started/
 import { getSecret, setSecret, deleteSecret } from './secure';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { mapHardcoverHistory, type ReadElsewhere } from './reading-history';
 
 const URL = 'https://api.hardcover.app/v1/graphql';
 const KEY = 'hardcover_token';
@@ -70,6 +71,49 @@ export async function searchBooks(q: string): Promise<HcBook[]> {
       hasAudio: doc.has_audiobook ?? (doc.audio_seconds ?? 0) > 0,
     } as HcBook;
   }).filter((b: HcBook) => b.id);
+}
+
+// ---- "Import reading history": the signed-in user's books marked Read ----
+// Written from the queries already in this file and src/ratings.ts and Hardcover's published schema.
+// It has NOT been run against the API by the author (it needs the user's token).
+const HC_HISTORY_QUERY = `query ReadingHistory($userId: Int!, $status: Int!, $limit: Int!, $offset: Int!) {
+  user_books(
+    where: { user_id: { _eq: $userId }, status_id: { _eq: $status } }
+    order_by: { id: asc }
+    limit: $limit
+    offset: $offset
+  ) {
+    id
+    rating
+    book {
+      id
+      title
+      image { url }
+      contributions { author { name } }
+    }
+    user_book_reads(order_by: { finished_at: desc }, limit: 5) { finished_at }
+  }
+}`;
+export const HC_HISTORY_CAP = 2000;
+const HC_HISTORY_PAGE = 100;
+
+/**
+ * Every book the user has marked Read on Hardcover, paged through until the list ends or
+ * {@link HC_HISTORY_CAP} is reached. Needs a token; without one the GraphQL call throws.
+ */
+export async function fetchHardcoverHistory(): Promise<ReadElsewhere[]> {
+  const me = await cachedMe();
+  if (!me) throw new Error('Could not load your Hardcover account');
+  const out: ReadElsewhere[] = [];
+  for (let offset = 0; offset < HC_HISTORY_CAP; offset += HC_HISTORY_PAGE) {
+    const d = await gql<{ user_books: unknown[] }>(HC_HISTORY_QUERY, {
+      userId: me.id, status: STATUS.READ, limit: HC_HISTORY_PAGE, offset,
+    });
+    const rows = d.user_books ?? [];
+    out.push(...mapHardcoverHistory(rows));
+    if (rows.length < HC_HISTORY_PAGE) break;
+  }
+  return out.slice(0, HC_HISTORY_CAP);
 }
 
 // ---- Link between a TorBox torrent and a Hardcover book ----

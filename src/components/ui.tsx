@@ -212,11 +212,11 @@ export function SkipIcon({ dir, seconds, size = 34, color = C.text }: { dir: 'ba
   return <Ionicons name={dir === 'back' ? 'play-back' : 'play-forward'} size={size - 4} color={color} />;
 }
 
-export function Chip({ label, active, onPress, icon }: { label: string; active?: boolean; onPress?: () => void; icon?: IconName }) {
+export function Chip({ label, active, onPress, icon, accessibilityLabel }: { label: string; active?: boolean; onPress?: () => void; icon?: IconName; accessibilityLabel?: string }) {
   const pop = usePop(!!active, 0.88);
   return (
     <Animated.View style={{ transform: [{ scale: pop }] }}>
-      <Tap accessibilityLabel={label} accessibilityState={{ selected: !!active }} onPress={onPress} haptic hitSlop={5} style={{
+      <Tap accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected: !!active }} onPress={onPress} haptic hitSlop={5} style={{
         paddingHorizontal: 14, height: 34, borderRadius: R.pill, flexDirection: 'row', alignItems: 'center', gap: 6,
         backgroundColor: active ? C.accent : C.elevated, borderWidth: 1, borderColor: active ? C.accent : C.line,
       }}>

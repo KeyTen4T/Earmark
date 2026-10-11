@@ -3,7 +3,9 @@ import { AppState } from 'react-native';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer } from 'expo-audio';
 import { TBTorrent, TBFile, chapterList, chapterTitle, getStreamUrl } from '../torbox';
-import { loadProgress, saveProgress, saveMeta, loadSettings, saveSettings, BookMeta } from '../storage';
+import { chapterAt, chapterBounds, type EmbeddedChapter } from '../chapters/embedded';
+import { fetchEmbeddedChapters } from '../chapters/fetch';
+import { loadProgress, saveProgress, saveMeta, loadSettings, saveSettings, loadEmbeddedChapters, saveEmbeddedChapters, BookMeta } from '../storage';
 import { prettyName } from '../theme';
 import { syncProgress } from '../hardcover';
 import { syncNow, syncAfterProgress, onSyncApplied } from '../sync';
@@ -18,6 +20,11 @@ type PlayerState = {
   book: TBTorrent | null;
   meta: BookMeta;
   chapters: TBFile[];
+  /**
+   * Chapters found inside the single audio file, or null. Only set for a one-file book; the file
+   * itself stays `chapters[0]`, so progress, sync and recovery are untouched.
+   */
+  embedded: EmbeddedChapter[] | null;
   index: number;
   position: number;
   /** Wall-clock time (ms epoch) of the last position report or seek, for read-along extrapolation. */
@@ -49,6 +56,10 @@ type PlayerApi = PlayerState & {
   seek: (seconds: number) => void;
   skip: (delta: number) => void;
   goChapter: (i: number) => void;
+  /** Moves to a chapter: an embedded one for a one-file book, otherwise the file at `i`. */
+  pickChapter: (i: number) => void;
+  prevChapter: () => void;
+  nextChapter: () => void;
   setRate: (r: number) => void;
   setSleep: (m: 'off' | 'chapter' | number) => void;
   setSkips: (back: number, forward: number) => void;
@@ -57,6 +68,12 @@ type PlayerApi = PlayerState & {
   updateMeta: (bookId: number, m: BookMeta) => void;
   displayTitle: string;
   chapterName: string;
+  /** Index of the embedded chapter playing now, or the file index when there are none. */
+  chapterIndex: number;
+  /** Embedded chapter count for a one-file book, otherwise the audio file count. */
+  chapterCount: number;
+  /** Index into `embedded` (same as `chapterIndex` when embedded chapters are present, -1 otherwise). */
+  embeddedIndex: number;
 };
 
 const Ctx = createContext<PlayerApi | null>(null);
@@ -72,7 +89,7 @@ const INTENT_GRACE_MS = 2_000; // ignore a brief "paused" right after we asked t
 
 export function PlayerProvider({ token, children }: { token: string; children: React.ReactNode }) {
   const [s, setS] = useState<PlayerState>({
-    book: null, meta: {}, chapters: [], index: 0, position: 0, positionAt: 0, seekPending: false,
+    book: null, meta: {}, chapters: [], embedded: null, index: 0, position: 0, positionAt: 0, seekPending: false,
     seekBase: null,
     duration: 0, playing: false, loading: false,
     recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30,
@@ -93,6 +110,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   // finish (or a re-listen from the start) from a status tick that merely reports the end.
   const finishedRef = useRef<{ id: number; done: boolean }>({ id: 0, done: false });
   const sleepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sleepChapter = useRef<number | null>(null); // the embedded chapter an "end of chapter" timer is waiting on
   const loadToken = useRef(0);
 
   // ---- Stream recovery. User intent is tracked separately from what the player reports, so a
@@ -361,6 +379,25 @@ export function PlayerProvider({ token, children }: { token: string; children: R
         playing: !!status.playing,
       });
 
+      // "End of chapter" for a one-file book: there is no file boundary to catch, so stop when playback
+      // crosses into the next embedded chapter. Status ticks are too coarse to catch the boundary
+      // itself, so remember the chapter the timer is waiting on and stop once a later one is playing.
+      const emb = st.current.embedded;
+      if (!emb || st.current.sleep?.kind !== 'chapter' || pend) sleepChapter.current = null; // a seek re-arms it
+      else if (!st.current.loading && !recovering.current) {
+        const bi = chapterAt(emb, pos);
+        if (sleepChapter.current === null || bi < sleepChapter.current) sleepChapter.current = bi;
+        else if (bi > sleepChapter.current) {
+          sleepChapter.current = null;
+          wantPlaying.current = false;
+          cancelRecovery();
+          player.current?.pause();
+          patch({ sleep: null, playing: false });
+          persist(true);
+          return;
+        }
+      }
+
       if (status.didJustFinish) {
         const c = st.current;
         const hasNext = c.index < c.chapters.length - 1;
@@ -502,6 +539,32 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     });
   }), []);
 
+  // ---- Embedded chapters in a single-file book. Probed after playback has started, never awaited,
+  // and applied only while that exact file is still loaded; a failure leaves everything as it was. ----
+  const probing = useRef('');
+  const applyEmbedded = (bookId: number, fileId: number, chapters: EmbeddedChapter[] | null) => {
+    const c = st.current;
+    if (c.book?.id !== bookId || c.chapters[c.index]?.id !== fileId) return;
+    patch({ embedded: chapters });
+  };
+  const probeEmbedded = async (book: TBTorrent, file: TBFile) => {
+    if (!book.hash || !(file.size > 0)) return;
+    const key = `${book.hash.toLowerCase()}:${file.id}`;
+    if (probing.current === key) return;
+    probing.current = key;
+    try {
+      const cached = await loadEmbeddedChapters(book.hash, file.id);
+      if (cached !== undefined) { applyEmbedded(book.id, file.id, cached); return; }
+      if (st.current.book?.id !== book.id) return; // the user moved on while the cache was read
+      if (localChapter.current) return; // a downloaded file needs no link and must not be probed
+      const url = await getStreamUrl(token, book.id, file.id);
+      const found = await fetchEmbeddedChapters(url, file.size);
+      await saveEmbeddedChapters(book.hash, file.id, found);
+      applyEmbedded(book.id, file.id, found);
+    } catch { /* probing is best effort */ }
+    finally { if (probing.current === key) probing.current = ''; }
+  };
+
   const open: PlayerApi['open'] = async (book, meta, opts = {}) => {
     cancelRecovery();
     wantPlaying.current = false;
@@ -529,10 +592,13 @@ export function PlayerProvider({ token, children }: { token: string; children: R
       return;
     }
     player.current?.pause();
-    st.current = { ...st.current, book, meta, chapters };
-    patch({ book, meta, chapters });
+    st.current = { ...st.current, book, meta, chapters, embedded: null };
+    patch({ book, meta, chapters, embedded: null });
     saveSettings({ lastBookId: book.id });
     await loadChapter(idx, start, opts.autoplay ?? true);
+    // A one-file book may carry its own chapters; look them up behind the scenes. `loadChapter`
+    // has set `localChapter`, so a downloaded file is skipped.
+    if (chapters.length === 1) void probeEmbedded(book, chapters[0]);
   };
 
   const toggle = () => {
@@ -573,6 +639,38 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     loadChapter(i, 0, true);
   };
 
+  // Tapping a row in the chapter list. An embedded row is a position inside the one file, so it
+  // goes through `seek` and the read-along's seek-base tracking like the scrubber does.
+  const pickChapter = (i: number) => {
+    const c = st.current;
+    if (c.embedded && c.embedded[i]) { seek(c.embedded[i].start); return; }
+    goChapter(i);
+  };
+
+  const prevChapter = () => {
+    const c = st.current;
+    if (c.embedded && c.embedded.length) {
+      const i = chapterAt(c.embedded, c.position);
+      const b = chapterBounds(c.embedded, i, c.duration);
+      if (i > 0 && c.position <= b.start + 5) seek(c.embedded[i - 1].start);
+      else seek(b.start); // a few seconds in: restart this chapter, like the multi-file control
+      return;
+    }
+    if (c.position > 5) seek(0);
+    else goChapter(c.index - 1);
+  };
+
+  const nextChapter = () => {
+    const c = st.current;
+    if (c.embedded && c.embedded.length) {
+      const i = chapterAt(c.embedded, c.position);
+      if (i >= c.embedded.length - 1) return;
+      seek(c.embedded[i + 1].start);
+      return;
+    }
+    goChapter(c.index + 1);
+  };
+
   const setRate = (r: number) => {
     patch({ rate: r });
     player.current?.setPlaybackRate(r);
@@ -609,18 +707,27 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const lock = (player.current as any)?.clearLockScreenControls;
     if (typeof lock === 'function') lock.call(player.current);
     setSeekBase(null);
-    patch({ book: null, chapters: [], playing: false, recovering: false, local: false });
+    patch({ book: null, chapters: [], embedded: null, playing: false, recovering: false, local: false });
   };
 
   const updateMeta = (bookId: number, m: BookMeta) => {
     if (st.current.book?.id === bookId) patch({ meta: { ...st.current.meta, ...m } });
   };
 
-  const value = useMemo<PlayerApi>(() => ({
-    ...s, open, toggle, seek, skip, goChapter, setRate, setSleep, setSkips, stop, updateMeta,
-    displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
-    chapterName: s.chapters[s.index] ? chapterTitle(s.chapters[s.index]) : '',
-  }), [s]);
+  const value = useMemo<PlayerApi>(() => {
+    const embedded = s.embedded;
+    const embeddedIndex = embedded ? chapterAt(embedded, s.position) : -1;
+    return {
+      ...s, open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep, setSkips, stop, updateMeta,
+      displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
+      chapterName: embedded
+        ? embedded[embeddedIndex]?.title ?? ''
+        : s.chapters[s.index] ? chapterTitle(s.chapters[s.index]) : '',
+      chapterIndex: embedded ? embeddedIndex : s.index,
+      chapterCount: embedded ? embedded.length : s.chapters.length,
+      embeddedIndex,
+    };
+  }, [s]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

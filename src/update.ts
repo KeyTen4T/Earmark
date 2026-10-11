@@ -30,6 +30,27 @@ export function openUpdate(release: Release): void {
   if (url) void Linking.openURL(url);
 }
 
+/**
+ * The release notes for one version, fetched by tag (`v<version>`) with the same unauthenticated
+ * headers and timeout as the update check. Returns null on any failure, so an offline start leaves
+ * the stored version untouched and tries again next time.
+ */
+export async function fetchReleaseNotes(version: string): Promise<Release | null> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 15000);
+  try {
+    const res = await fetch(`https://api.github.com/repos/KeyTen4T/Earmark/releases/tags/v${version}`,
+      { headers: { Accept: 'application/vnd.github+json' }, signal: ctl.signal });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return parseRelease(json);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // The newer release found this session, so Settings can show it without checking again.
 let known: Release | null = null;
 const listeners = new Set<() => void>();

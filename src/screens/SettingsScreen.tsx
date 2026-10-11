@@ -4,11 +4,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
 import app from '../../app.json';
-import { Tap, Sheet, Button, Chip, toast, IconName, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction } from '../components/ui';
+import { Tap, Sheet, Button, Chip, toast, IconName, IconButton, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction } from '../components/ui';
 import type { ScraperDef } from '../scrapers/engine';
 import { pickScraperFiles, fetchScrapers, parseScrapers, EXAMPLE_SCRAPER } from '../scrapers/importer';
-import { makeBackupFile, pickBackupFile, applyBackupFile, exportBackupFile } from '../backup-io';
-import { backupSummary, type BackupFile, type BackupSummary } from '../backup';
+import { makeBackupFile, makeSetupFile, pickImportFile, applyBackupFile, applySetupFile, exportBackupFile } from '../backup-io';
+import { backupSummary, setupSummary, type ImportFile } from '../backup';
 import { usePlayer } from '../player/PlayerContext';
 import { SourceEditor } from '../components/SourceEditor';
 import { AiProvider, providerFor, providerName, pickModel, cleanKey } from '../recommend';
@@ -17,24 +17,33 @@ import {
   loadReadalongServerUrl, saveReadalongServerUrl, getReadalongServerToken,
   setReadalongServerToken, clearReadalongServer,
   loadEbookSearchUrl, saveEbookSearchUrl,
-  saveDismissedUpdate,
+  saveDismissedUpdate, loadRemovedReadElsewhere,
 } from '../storage';
 import { checkForUpdate, openUpdate, currentVersion, knownUpdate, setKnownUpdate, subscribeUpdate } from '../update';
 import { summary, type Release } from '../update-check';
 import { testServer, normalizeServerUrl } from '../readalong/server';
 import { isHttpUrl } from '../readalong/ebookSearch';
-import { fetchMe, setHcToken, getHcToken, cachedMe, HcUser } from '../hardcover';
+import { fetchMe, setHcToken, getHcToken, cachedMe, fetchHardcoverHistory, HcUser } from '../hardcover';
+import { pickGoodreadsExport, applyReadingPlan } from '../reading-import';
+import { planReadingImport, type ImportPlan, type LibraryBook, type ReadElsewhere } from '../reading-history';
 import { getSyncStatus, subscribeSyncStatus, connectSync, disconnectSync, syncNow, type SyncStatus } from '../sync';
 import { getDownloads, subscribeDownloads, totalBytesUsed, removeAllDownloads } from '../downloads';
 import { formatBytes } from '../scrapers/template';
 import type { Downloads } from '../downloads/state';
+import { toggleNarrator } from '../narrators';
 
-export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, onDisabled, onSignOut, bottomPad }: {
+export function SettingsScreen({ builtins, userScrapers, disabled, narrators, library, readElsewhere, onScrapers, onDisabled, onNarrators, onReadElsewhere, onImported, onSignOut, bottomPad }: {
   builtins: ScraperDef[];
   userScrapers: ScraperDef[];
   disabled: string[];
+  narrators: string[];
+  library: LibraryBook[];
+  readElsewhere: ReadElsewhere[];
   onScrapers: (s: ScraperDef[]) => void;
   onDisabled: (ids: string[]) => void;
+  onNarrators: (list: string[]) => void;
+  onReadElsewhere: (list: ReadElsewhere[]) => void;
+  onImported: () => void;
   onSignOut: () => void;
   bottomPad: number;
 }) {
@@ -48,14 +57,14 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
   const [formatOpen, setFormatOpen] = useState(false);
   const [hcUser, setHcUser] = useState<HcUser | null>(null);
   const [hcOpen, setHcOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProvider | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => getSyncStatus());
   useEffect(() => subscribeSyncStatus(setSyncStatus), []);
-  const [backupFile, setBackupFile] = useState<BackupFile | null>(null);
-  const [backupBusy, setBackupBusy] = useState<null | 'export' | 'merge' | 'replace'>(null);
-  const backupInfo = backupFile ? backupSummary(backupFile) : null;
+  const [importData, setImportData] = useState<ImportFile | null>(null);
+  const [backupBusy, setBackupBusy] = useState<null | 'export' | 'setup' | 'merge' | 'replace'>(null);
   const [downloads, setDownloads] = useState<Downloads>(() => getDownloads());
   useEffect(() => subscribeDownloads(setDownloads), []);
   const [checking, setChecking] = useState(false);
@@ -70,6 +79,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
   }, []);
   useEffect(() => { reloadRaServer(); }, [reloadRaServer]);
   const [ebookOpen, setEbookOpen] = useState(false);
+  const [narratorsOpen, setNarratorsOpen] = useState(false);
   const [ebookUrl, setEbookUrl] = useState('');
   const reloadEbookUrl = useCallback(() => {
     loadEbookSearchUrl().then(setEbookUrl, () => setEbookUrl(''));
@@ -163,29 +173,61 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
     finally { setBackupBusy(null); }
   };
 
+  // The setup file is a copy of the source definitions, so a source's address may carry personal ids.
+  const shareSetup = async () => {
+    if (backupBusy) return;
+    if (!(await confirmAction('Share my setup?',
+      'The file contains your source definitions exactly as they are on this device. A source’s address can include personal IDs, so only send it to people you trust.',
+      'Share'))) return;
+    setBackupBusy('setup');
+    try {
+      const r = await exportBackupFile(await makeSetupFile());
+      if (r === 'saved') toast('Setup saved');
+    } catch (e: any) { toast(e?.message ?? 'Could not share your setup', 'err'); }
+    finally { setBackupBusy(null); }
+  };
+
   const pickImport = async () => {
     try {
-      const f = await pickBackupFile();
-      if (f) setBackupFile(f);
+      const f = await pickImportFile();
+      if (f) setImportData(f);
     } catch (e: any) { toast(e?.message ?? 'Could not read that file', 'err'); }
   };
 
   const applyImport = async (mode: 'merge' | 'replace') => {
-    if (!backupFile) return;
+    if (!importData || importData.kind !== 'backup') return;
     if (mode === 'replace' && !(await confirmAction('Replace all data on this device?',
       `This overwrites progress, ratings and the rest on this device${syncStatus.connected ? ', and — with sync on — on your other devices' : ''}.`,
       'Replace'))) return;
     setBackupBusy(mode);
     try {
-      const s = backupSummary(backupFile);
-      const next = await applyBackupFile(backupFile, mode);
+      const s = backupSummary(importData);
+      const next = await applyBackupFile(importData, mode);
       onScrapers(next.sources);
       onDisabled(next.disabled);
+      onNarrators(next.narrators);
+      onReadElsewhere(next.readElsewhere);
       reloadEbookUrl();
       reloadRaServer();
-      setBackupFile(null);
+      setImportData(null);
       toast(`${mode === 'replace' ? 'Replaced' : 'Merged'}: ${s.withProgress} books with progress, ${s.sources} sources`);
     } catch (e: any) { toast(e?.message ?? 'Could not import the backup', 'err'); }
+    finally { setBackupBusy(null); }
+  };
+
+  // A setup file only adds: sources it carries that are not here, and the search address if unset.
+  const addSetup = async () => {
+    if (!importData || importData.kind !== 'setup' || backupBusy) return;
+    setBackupBusy('setup');
+    try {
+      const have = new Set(userScrapers.map((s) => s.id));
+      const added = importData.data.sources.filter((s) => !have.has(s.id)).length;
+      const next = await applySetupFile(importData);
+      onScrapers(next.sources);
+      reloadEbookUrl();
+      setImportData(null);
+      toast(added ? `Added ${added} source${added === 1 ? '' : 's'}` : 'No new sources to add');
+    } catch (e: any) { toast(e?.message ?? 'Could not add the setup', 'err'); }
     finally { setBackupBusy(null); }
   };
 
@@ -238,10 +280,20 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
         </View>
 
         <Section title="Tracking">
-          <Row last onPress={() => setHcOpen(true)}
+          <Row onPress={() => setHcOpen(true)}
             left={<Badge icon="bookmarks" color="#7C5CFF" />}
             title="Hardcover"
             sub={hcUser ? `Connected as @${hcUser.username}` : 'Sync progress and finished books'}
+            right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+          <Row onPress={() => setHistoryOpen(true)}
+            left={<Badge icon="time-outline" color="#7C5CFF" />}
+            title="Import reading history"
+            sub="Books you finished elsewhere, for the Finished shelf"
+            right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+          <Row last onPress={() => setNarratorsOpen(true)}
+            left={<Badge icon="heart" color="#FF6B6B" />}
+            title="Narrators you follow"
+            sub={narrators.length ? `${narrators.length} followed` : 'Follow narrators from a search result'}
             right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
         </Section>
 
@@ -262,13 +314,18 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
             title="Export data"
             sub="Save progress, ratings, sources and settings to a file"
             right={backupBusy === 'export' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+          <Row onPress={shareSetup}
+            left={<Badge icon="share-social-outline" color="#4ADE80" />}
+            title="Share my setup"
+            sub="A file with your sources and search address, for another person"
+            right={backupBusy === 'setup' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
           <Row last onPress={pickImport}
             left={<Badge icon="cloud-upload-outline" color="#4ADE80" />}
             title="Import data"
-            sub="Restore from a backup file"
+            sub="Restore from a backup or setup file"
             right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
         </Section>
-        <Text style={[T.small, { marginTop: -12, marginBottom: 12 }]}>Keys and tokens are never included in a backup.</Text>
+        <Text style={[T.small, { marginTop: -12, marginBottom: 12 }]}>Keys and tokens are never included in a backup or setup file.</Text>
 
         <Section title="Read-along">
           <Row onPress={() => setRaOpen(true)}
@@ -367,10 +424,13 @@ export function SettingsScreen({ builtins, userScrapers, disabled, onScrapers, o
 
       <AiKeySheet visible={aiOpen} onClose={() => setAiOpen(false)} provider={aiProvider} onProvider={setAiProvider} />
       <HardcoverSheet visible={hcOpen} onClose={() => setHcOpen(false)} user={hcUser} onUser={setHcUser} />
+      <ReadingHistorySheet visible={historyOpen} onClose={() => setHistoryOpen(false)}
+        library={library} existing={readElsewhere} onReadElsewhere={onReadElsewhere} onImported={onImported} />
       <SyncSheet visible={syncOpen} onClose={() => setSyncOpen(false)} status={syncStatus} />
       <ReadalongServerSheet visible={raOpen} onClose={() => setRaOpen(false)} onChanged={reloadRaServer} />
       <EbookSearchSheet visible={ebookOpen} onClose={() => setEbookOpen(false)} onChanged={reloadEbookUrl} />
-      <ImportBackupSheet visible={!!backupFile} info={backupInfo} busy={backupBusy} onClose={() => setBackupFile(null)} onMerge={() => applyImport('merge')} onReplace={() => applyImport('replace')} />
+      <NarratorsSheet visible={narratorsOpen} onClose={() => setNarratorsOpen(false)} narrators={narrators} onNarrators={onNarrators} />
+      <ImportBackupSheet visible={!!importData} file={importData} busy={backupBusy} onClose={() => setImportData(null)} onMerge={() => applyImport('merge')} onReplace={() => applyImport('replace')} onAdd={addSetup} />
     </View>
   );
 }
@@ -441,6 +501,77 @@ function HardcoverSheet({ visible, onClose, user, onUser }: { visible: boolean; 
             <Text onPress={() => Linking.openURL('https://hardcover.app/account/api')} style={[T.small, { textAlign: 'center', color: C.accent }]}>Open hardcover.app/account/api</Text>
           </>
         )}
+      </View>
+    </Sheet>
+  );
+}
+
+function ReadingHistorySheet({ visible, onClose, library, existing, onReadElsewhere, onImported }: {
+  visible: boolean; onClose: () => void;
+  library: LibraryBook[]; existing: ReadElsewhere[];
+  onReadElsewhere: (list: ReadElsewhere[]) => void; onImported: () => void;
+}) {
+  const [hasToken, setHasToken] = useState<boolean | null>(null);
+  const [plan, setPlan] = useState<ImportPlan | null>(null);
+  const [busy, setBusy] = useState<null | 'hardcover' | 'goodreads' | 'import'>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    setPlan(null); setError(null);
+    getHcToken().then((t) => setHasToken(!!t), () => setHasToken(false));
+  }, [visible]);
+
+  // Fetches or parses first, then shows a summary; nothing is written until Import.
+  const load = async (source: 'hardcover' | 'goodreads') => {
+    setError(null); setPlan(null); setBusy(source);
+    try {
+      const books = source === 'hardcover' ? await fetchHardcoverHistory() : await pickGoodreadsExport();
+      if (!books) return; // the picker was cancelled
+      const removed = await loadRemovedReadElsewhere();
+      setPlan(planReadingImport(books, library, existing, removed));
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not read your reading history');
+    } finally { setBusy(null); }
+  };
+
+  const runImport = async () => {
+    if (!plan) return;
+    setBusy('import');
+    try {
+      await applyReadingPlan(plan);
+      onReadElsewhere(plan.entries);
+      onImported();
+      toast(`${plan.added} added, ${plan.updated} updated, ${plan.matchedFinished} already in your library, ${plan.skippedUnfinished} skipped`);
+      onClose();
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not import your reading history');
+    } finally { setBusy(null); }
+  };
+
+  return (
+    <Sheet visible={visible} onClose={onClose} title="Import reading history">
+      <View style={{ paddingHorizontal: 20, gap: 12 }}>
+        {plan ? (
+          <>
+            <Text style={T.body}>
+              {plan.found} read book{plan.found === 1 ? '' : 's'} found. {plan.matchedFinished} match finished books in your library
+              {plan.gainRating || plan.gainDate ? ` (${plan.gainRating} gain a rating, ${plan.gainDate} a finish date)` : ''}.
+              {' '}{plan.skippedUnfinished} match unfinished books and will be skipped. {plan.added} will be added to the Finished shelf, {plan.updated} already there will be updated.
+            </Text>
+            <Button label="Import" icon="download-outline" onPress={runImport} loading={busy === 'import'} disabled={busy !== null && busy !== 'import'} />
+            <Button kind="ghost" label="Cancel" onPress={onClose} />
+          </>
+        ) : (
+          <>
+            <Text style={T.body}>Finished these books on another service? Import them and they join the Finished shelf. Nothing is written until you confirm.</Text>
+            <Button label="From Hardcover" icon="bookmarks-outline" onPress={() => load('hardcover')} loading={busy === 'hardcover'} disabled={hasToken !== true || busy !== null} />
+            {hasToken === false ? <Text style={T.small}>Connect Hardcover above first.</Text> : null}
+            <Button kind="ghost" label="From a Goodreads export" icon="document-attach-outline" onPress={() => load('goodreads')} loading={busy === 'goodreads'} disabled={busy !== null} />
+            <Text style={T.small}>Goodreads: Account → My Books → Import/Export → Export Library.</Text>
+          </>
+        )}
+        {error ? <Text style={[T.small, { color: C.danger }]}>{error}</Text> : null}
       </View>
     </Sheet>
   );
@@ -602,10 +733,34 @@ function EbookSearchSheet({ visible, onClose, onChanged }: {
   );
 }
 
-function ImportBackupSheet({ visible, info, busy, onClose, onMerge, onReplace }: {
-  visible: boolean; info: BackupSummary | null; busy: null | 'export' | 'merge' | 'replace';
-  onClose: () => void; onMerge: () => void; onReplace: () => void;
+function NarratorsSheet({ visible, onClose, narrators, onNarrators }: {
+  visible: boolean; onClose: () => void; narrators: string[]; onNarrators: (list: string[]) => void;
 }) {
+  return (
+    <Sheet visible={visible} onClose={onClose} title="Narrators you follow">
+      <View style={{ paddingHorizontal: 20, gap: 12 }}>
+        {narrators.length ? (
+          <View style={{ backgroundColor: C.bg, borderRadius: R.md, borderWidth: 1, borderColor: C.line, overflow: 'hidden' }}>
+            {narrators.map((n, i) => (
+              <Row key={n} last={i === narrators.length - 1} title={n}
+                right={<IconButton name="close" label={`Stop following ${n}`} size={18} color={C.danger}
+                  onPress={() => { onNarrators(toggleNarrator(n, narrators)); toast(`Stopped following ${n}`); }} />} />
+            ))}
+          </View>
+        ) : (
+          <Text style={T.body}>You don’t follow any narrators yet. Open a search result in Discover and tap the heart beside a narrator’s name to follow them.</Text>
+        )}
+      </View>
+    </Sheet>
+  );
+}
+
+function ImportBackupSheet({ visible, file, busy, onClose, onMerge, onReplace, onAdd }: {
+  visible: boolean; file: ImportFile | null; busy: null | 'export' | 'setup' | 'merge' | 'replace';
+  onClose: () => void; onMerge: () => void; onReplace: () => void; onAdd: () => void;
+}) {
+  const info = file?.kind === 'backup' ? backupSummary(file) : null;
+  const setup = file?.kind === 'setup' ? setupSummary(file) : null;
   return (
     <Sheet visible={visible} onClose={onClose} title="Import data">
       <View style={{ paddingHorizontal: 20, gap: 12 }}>
@@ -615,11 +770,19 @@ function ImportBackupSheet({ visible, info, busy, onClose, onMerge, onReplace }:
               Exported {info.exportedAt ? new Date(info.exportedAt).toLocaleString() : 'at an unknown date'}{info.appVersion ? ` by Earmark ${info.appVersion}` : ''}.
             </Text>
             <Text style={T.body}>
-              {info.withProgress} books with progress · {info.finished} finished · {info.ratings} ratings · {info.wishlist} want to listen · {info.readalongs} read-alongs · {info.sources} sources
+              {info.withProgress} books with progress · {info.finished} finished · {info.ratings} ratings · {info.wishlist} want to listen · {info.readalongs} read-alongs · {info.readElsewhere} read elsewhere · {info.sources} sources
             </Text>
             <Button label="Merge" icon="git-merge-outline" onPress={onMerge} loading={busy === 'merge'} disabled={busy !== null && busy !== 'merge'} />
             <Button kind="ghost" label="Replace" icon="swap-horizontal-outline" onPress={onReplace} loading={busy === 'replace'} disabled={busy !== null && busy !== 'replace'} />
             <Text style={T.small}>Merge keeps what is on this device and takes newer records from the file. Replace makes the file the only truth on this device. Keys and tokens are not included.</Text>
+          </>
+        ) : setup ? (
+          <>
+            <Text style={T.body}>
+              A setup file with {setup.sources} source{setup.sources === 1 ? '' : 's'}{setup.search ? ' and an EPUB search address' : ''}.
+            </Text>
+            <Button label="Add to this device" icon="add-circle-outline" onPress={onAdd} loading={busy === 'setup'} />
+            <Text style={T.small}>Adds sources that are not already here. Your existing sources, the disabled list and your search address stay as they are. Keys and tokens are not included.</Text>
           </>
         ) : null}
       </View>

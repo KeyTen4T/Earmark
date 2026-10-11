@@ -7,6 +7,7 @@ import { C, R, T, fmtTime } from '../theme';
 import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY } from '../components/ui';
 import { ScraperDef, SearchResult, runSearch, resolveMagnet, dedupeResults, fetchDetail } from '../scrapers/engine';
 import { isFullCast } from '../scrapers/cast';
+import { splitNarrators, isFavourite, resultFavourites, toggleNarrator, favouriteFirst } from '../narrators';
 import { hashFromMagnet } from '../scrapers/bencode';
 import { addMagnet, checkCached, torrentHealth, listTorrents, getStreamUrl, deleteTorrent } from '../torbox';
 import { createPreviewController, canPreview, magnetFor, type PreviewController, type PreviewState } from '../preview';
@@ -18,7 +19,7 @@ import type { HistoryItem } from '../recommend';
 
 type AddState = 'adding' | 'added';
 
-type Props = { token: string; history: HistoryItem[]; scrapers: ScraperDef[]; bottomPad: number; active: boolean; onAdded: (hash?: string) => void; goSources: () => void };
+type Props = { token: string; history: HistoryItem[]; scrapers: ScraperDef[]; bottomPad: number; active: boolean; onAdded: (hash?: string) => void; goSources: () => void; narrators: string[]; onNarrators: (list: string[]) => void };
 type Mode = 'catalog' | 'sources';
 
 /** Discover has two searches: the general audiobook catalogue, and the user's own sources (which can add to TorBox). */
@@ -49,7 +50,7 @@ export function DiscoverScreen(props: Props) {
   );
 }
 
-function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, modeToggle, seed }: Props & {
+function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, narrators, onNarrators, modeToggle, seed }: Props & {
   modeToggle: React.ReactNode; seed: { q: string; n: number } | null; // seed: a search handed over from the catalogue
 }) {
   const insets = useSafeAreaInsets();
@@ -151,6 +152,13 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
     void preview.start({ id: r.id, hash: r.infoHash, magnet, title: r.title, narrator: r.narrator });
   };
 
+  // Follow or unfollow one narrator name; the shared list re-renders the sheet and the results at once.
+  const toggleFavourite = (name: string) => {
+    const next = toggleNarrator(name, narrators);
+    onNarrators(next);
+    toast(isFavourite(name, next) ? `Following ${name}` : `Stopped following ${name}`);
+  };
+
   const add = async (r: SearchResult) => {
     if (adding[r.id]) return;
     // A preview may already have added the torrent: keep it rather than adding a second copy.
@@ -207,7 +215,10 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
     }
   };
 
-  const shown = source ? results.filter((r) => r.scraperId === source) : results;
+  // Keep the existing order (source grouping when a source chip is active) but float results read by
+  // a followed narrator to the top of it, stably: within each group the original order is preserved.
+  const base = source ? results.filter((r) => r.scraperId === source) : results;
+  const shown = favouriteFirst(base, (r) => r.narrator, narrators);
   const counts = results.reduce<Record<string, number>>((a, r) => ((a[r.scraperId] = (a[r.scraperId] ?? 0) + 1), a), {});
   const busy = pending.length > 0;
 
@@ -279,7 +290,7 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
         }
         renderItem={({ item: r, index }) => (
           <FadeIn index={index} style={listCols > 1 ? { flex: 1 } : undefined}>
-            <ResultRow r={r} cached={!!r.infoHash && cached.has(r.infoHash)} state={adding[r.id]} onAdd={() => add(r)} onPress={() => { preview.stop(); setDetailId(r.id); }} />
+            <ResultRow r={r} cached={!!r.infoHash && cached.has(r.infoHash)} favourite={resultFavourites(r.narrator, narrators).length > 0} state={adding[r.id]} onAdd={() => add(r)} onPress={() => { preview.stop(); setDetailId(r.id); }} />
           </FadeIn>
         )}
       />
@@ -293,7 +304,18 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
               <View style={{ flex: 1, gap: 4 }}>
                 <Text style={T.h2} numberOfLines={4}>{detail.title}</Text>
                 {detail.author ? <Text style={T.body}>by {detail.author}</Text> : null}
-                {detail.narrator ? <Text style={T.small}>Narrated by {detail.narrator}</Text> : null}
+                {detail.narrator ? (
+                  <View style={{ gap: 6, marginTop: 2 }}>
+                    <Text style={T.small}>Narrated by</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                      {splitNarrators(detail.narrator).map((n) => {
+                        const fav = isFavourite(n, narrators);
+                        return <Chip key={n} label={n} active={fav} icon={fav ? 'heart' : 'heart-outline'}
+                          accessibilityLabel={fav ? `Stop following ${n}` : `Follow ${n}`} onPress={() => toggleFavourite(n)} />;
+                      })}
+                    </View>
+                  </View>
+                ) : null}
               </View>
             </View>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
@@ -348,7 +370,7 @@ function Meta({ icon, text, accent }: { icon: any; text: string; accent?: boolea
   );
 }
 
-function ResultRow({ r, cached, state, onAdd, onPress }: { r: SearchResult; cached: boolean; state?: AddState; onAdd: () => void; onPress: () => void }) {
+function ResultRow({ r, cached, favourite, state, onAdd, onPress }: { r: SearchResult; cached: boolean; favourite?: boolean; state?: AddState; onAdd: () => void; onPress: () => void }) {
   const bits = [r.size, r.duration, seedText(r, 'seeds')].filter(Boolean).join('  ·  ');
   const byline = [r.author, r.narrator ? `read by ${r.narrator}` : ''].filter(Boolean).join('  ·  ');
   return (
@@ -356,7 +378,12 @@ function ResultRow({ r, cached, state, onAdd, onPress }: { r: SearchResult; cach
       <Cover title={r.title} uri={r.cover} size={64} radius={10} />
       <View style={{ flex: 1, gap: 3 }}>
         <Text numberOfLines={2} style={[T.title, { fontSize: 15 }]}>{r.title}</Text>
-        {byline ? <Text numberOfLines={1} style={T.body}>{byline}</Text> : null}
+        {byline ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Text numberOfLines={1} style={[T.body, { flex: 1 }]}>{byline}</Text>
+            {favourite ? <Ionicons name="heart" size={12} color={C.accent} accessibilityLabel="Read by a narrator you follow" /> : null}
+          </View>
+        ) : null}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
           {cached && (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: 'rgba(255,181,71,0.15)', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 }}>

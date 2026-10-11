@@ -36,8 +36,13 @@ import './library-search.test.ts';
 import './ratings.test.ts';
 // Full-cast and dramatised detection for the sources list.
 import './cast.test.ts';
+// Following narrators: name splitting, normalising, toggling and floating followed results up.
+import './narrators.test.ts';
 // Which content the wide player's second pane shows, and when it splits at all.
 import './panes.test.ts';
+// Chapters embedded inside a single audio file (MP4 chpl/QuickTime track, MP3 ID3v2 CHAP) and the
+// HTTP range reader that fetches just enough to find them.
+import './chapters.test.ts';
 // The idle-chrome timings and the tap-to-seek guard for immersive reading.
 import './idle-chrome.test.ts';
 // Reading stored JSON: telling a corrupt value (kept as a backup) from a missing one.
@@ -46,11 +51,17 @@ import './stored-json.test.ts';
 import './update.test.ts';
 // The finished shelf: year grouping, finish dates and half-star rating taps are pure.
 import './shelf.test.ts';
+// Importing a reading history from Hardcover or a Goodreads export: matching and the pure plan.
+import './reading-history.test.ts';
+// The Goodreads CSV reader and its read-row mapping.
+import './goodreads.test.ts';
 import './library-poll.test.ts';
 // Backup files and their build/parse/merge/replace logic are pure too.
 import './backup.test.ts';
 // The narrator preview's decisions and its fake-driven controller are pure.
 import './preview.test.ts';
+// The car-mode screen's chapter line and current-file progress/remaining time are pure.
+import './car-mode.test.ts';
 
 test('sha1 matches node crypto across lengths', () => {
   for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 1000, 70000]) {

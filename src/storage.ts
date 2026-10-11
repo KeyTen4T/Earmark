@@ -3,8 +3,10 @@ import { getSecret, setSecret, deleteSecret } from './secure';
 import type { ScraperDef } from './scrapers/engine';
 import type { CatalogBook } from './catalog';
 import type { Downloads } from './downloads/state';
+import type { EmbeddedChapter } from './chapters/embedded';
 import type { ReadalongRecord } from './readalong/anchors';
 import type { PendingJobs } from './readalong/pending';
+import type { ReadElsewhere } from './reading-history';
 import { emitLocalChange } from './sync/events';
 import { sizeWeightedFraction } from './book-math';
 import { parseStored } from './json-store';
@@ -108,6 +110,25 @@ export const saveDownloads = (d: Downloads) => setJSON('downloads', d);
  */
 export const bookFraction = (p?: Progress, sizes?: number[]) =>
   !p ? 0 : sizeWeightedFraction(sizes, p.chapterIndex, p.position, p.duration, p.chapterCount, p.finished);
+
+// ---- Embedded chapters found inside a single-file book (device-local; not synced, not in backups) ----
+// Keyed by info-hash + file id so each file is probed once. A `chapters: null` entry is the "none
+// found" marker: the file was read and had no usable chapters, so it need not be fetched again.
+// The version lets a future parser change invalidate everything at once.
+export const EMBEDDED_CACHE_VERSION = 1;
+type EmbeddedCache = Record<string, { v: number; chapters: EmbeddedChapter[] | null }>;
+const embeddedKey = (hash: string, fileId: number) => `${hash.toLowerCase()}:${fileId}`;
+const loadEmbeddedCache = () => getJSON<EmbeddedCache>('embedded_chapters', {});
+/** The cached chapters for a file, or undefined when it has never been probed. */
+export async function loadEmbeddedChapters(hash: string, fileId: number): Promise<EmbeddedChapter[] | null | undefined> {
+  const e = (await loadEmbeddedCache())[embeddedKey(hash, fileId)];
+  return e && e.v === EMBEDDED_CACHE_VERSION ? e.chapters : undefined;
+}
+export async function saveEmbeddedChapters(hash: string, fileId: number, chapters: EmbeddedChapter[] | null) {
+  const all = await loadEmbeddedCache();
+  all[embeddedKey(hash, fileId)] = { v: EMBEDDED_CACHE_VERSION, chapters };
+  await setJSON('embedded_chapters', all);
+}
 
 // ---- Book metadata (cover/author) remembered from search, keyed by info-hash ----
 // coverChecked: when a cover lookup last found nothing (ms), so it isn't repeated on every refresh.
@@ -266,6 +287,25 @@ export async function clearReadalongServer() {
   await deleteSecret(READALONG_SERVER_TOKEN);
 }
 
+// ---- Narrators the user follows (device-local; deliberately absent from the sync document) ----
+// Stored as typed, compared through src/narrators' normaliser. Included in a backup, never a setup file.
+export const loadFavNarrators = () => getJSON<string[]>('fav_narrators', []);
+export const saveFavNarrators = (list: string[]) => setJSON('fav_narrators', list);
+
+// ---- Books finished elsewhere (imported from Hardcover or a Goodreads export). Device-local: the sync
+// document never carries them, but a full backup does and a setup file does not. `read_elsewhere_removed`
+// remembers ids the user took off the shelf, so re-importing the same source does not bring them back.
+export const loadReadElsewhere = () => getJSON<ReadElsewhere[]>('read_elsewhere', []);
+export const saveReadElsewhere = (list: ReadElsewhere[]) => setJSON('read_elsewhere', list);
+export const loadRemovedReadElsewhere = () => getJSON<string[]>('read_elsewhere_removed', []);
+export const saveRemovedReadElsewhere = (ids: string[]) => setJSON('read_elsewhere_removed', ids);
+/** Takes one entry off the shelf and remembers its id, so a later import does not restore it. */
+export async function removeReadElsewhere(id: string) {
+  const [list, removed] = await Promise.all([loadReadElsewhere(), loadRemovedReadElsewhere()]);
+  await saveReadElsewhere(list.filter((e) => e.id !== id));
+  if (!removed.includes(id)) await saveRemovedReadElsewhere([...removed, id]);
+}
+
 // ---- EPUB search address for the read-along builder (device-local; not in the sync document) ----
 const EBOOK_SEARCH_URL_KEY = 'ebook_search_url';
 export const loadEbookSearchUrl = () => getJSON<string>(EBOOK_SEARCH_URL_KEY, '');
@@ -280,6 +320,10 @@ export const loadUpdateCheckedAt = () => getJSON<number>('update_checked_at', 0)
 export const saveUpdateCheckedAt = (t: number) => setJSON('update_checked_at', t);
 export const loadDismissedUpdate = () => getJSON<string>('update_dismissed', '');
 export const saveDismissedUpdate = (version: string) => setJSON('update_dismissed', version);
+
+// ---- The version the app last ran (device-local; drives the one-time "what's new" sheet) ----
+export const loadLastVersion = () => getJSON<string>('last_version', '');
+export const saveLastVersion = (version: string) => setJSON('last_version', version);
 
 // ---- Scrapers ----
 export const loadUserScrapers = () => getJSON<ScraperDef[]>('scrapers', []);

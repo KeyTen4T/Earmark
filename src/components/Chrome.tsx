@@ -144,7 +144,7 @@ export function PlayerBar({ onOpen }: { onOpen: (sheet?: PlayerBarSheet) => void
         </Tap>
         <View style={{ flex: 1, maxWidth: 720, alignSelf: 'center' }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14, marginBottom: -4 }}>
-            <IconButton label="Previous chapter" name="play-skip-back" size={18} color={C.sub} onPress={() => (p.position > 5 ? p.seek(0) : p.goChapter(p.index - 1))} />
+            <IconButton label="Previous chapter" name="play-skip-back" size={18} color={C.sub} onPress={p.prevChapter} />
             <Tap onPress={() => p.skip(-p.skipBack)} hitSlop={8} scaleTo={0.88} accessibilityLabel={`Skip back ${p.skipBack} seconds`} style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center' }}>
               <SkipIcon dir="back" seconds={p.skipBack} size={24} color={C.sub} />
             </Tap>
@@ -156,12 +156,12 @@ export function PlayerBar({ onOpen }: { onOpen: (sheet?: PlayerBarSheet) => void
             <Tap onPress={() => p.skip(p.skipForward)} hitSlop={8} scaleTo={0.88} accessibilityLabel={`Skip forward ${p.skipForward} seconds`} style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center' }}>
               <SkipIcon dir="forward" seconds={p.skipForward} size={24} color={C.sub} />
             </Tap>
-            <IconButton label="Next chapter" name="play-skip-forward" size={18} color={C.sub} disabled={p.index >= p.chapters.length - 1} onPress={() => p.goChapter(p.index + 1)} />
+            <IconButton label="Next chapter" name="play-skip-forward" size={18} color={C.sub} disabled={p.chapterIndex >= p.chapterCount - 1} onPress={p.nextChapter} />
           </View>
           <Scrubber position={p.position} duration={p.duration} onSeek={p.seek} />
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }}>
-          <Text numberOfLines={1} style={{ color: C.sub, fontSize: 12, fontWeight: '700', marginRight: 4 }}>Chapter {p.index + 1} of {p.chapters.length}</Text>
+          <Text numberOfLines={1} style={{ color: C.sub, fontSize: 12, fontWeight: '700', marginRight: 4 }}>Chapter {p.chapterIndex + 1} of {p.chapterCount}</Text>
           <Tap onPress={() => onOpen('speed')} scaleTo={0.9} hitSlop={7} hoverStyle={{ backgroundColor: C.hover }}
             style={{ height: 30, paddingHorizontal: 10, borderRadius: R.pill, backgroundColor: C.elevated, borderWidth: 1, borderColor: p.rate !== 1 ? C.accent : C.line, alignItems: 'center', justifyContent: 'center' }}>
             <Text style={{ color: p.rate !== 1 ? C.accent : C.text, fontSize: 12, fontWeight: '800', fontVariant: ['tabular-nums'] }}>{p.rate}×</Text>

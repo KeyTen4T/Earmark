@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareVersions, parseRelease, updateAvailable, shouldAutoCheck, summary } from '../src/update-check';
+import { compareVersions, parseRelease, updateAvailable, shouldAutoCheck, summary, notesToBlocks, whatsNewDecision } from '../src/update-check';
 
 // A trimmed GitHub `releases/latest` payload, kept exactly as the API returns it.
 const FIXTURE = JSON.parse(`{
@@ -92,4 +92,50 @@ test('update: summary strips markdown markers and keeps the first lines', () => 
   assert.equal(summary('', 6), '');
   assert.equal(summary(42, 6), '');
   assert.equal(summary('a', 0), '');
+});
+
+// An intro line, a New section with two bullets, a Fixed section with one, then Install and Notes,
+// which a what's-new sheet drops.
+const NOTES = [
+  'Earmark 1.3.10 is here.',
+  '',
+  '**New**',
+  '- **Narrator preview** for cached results',
+  '- **Faster** startup',
+  '',
+  '**Fixed**',
+  '- A `crash` when resuming',
+  '',
+  '**Install**',
+  '- Download the APK',
+  '- Install it',
+  '',
+  '**Notes**',
+  '- Something else',
+].join('\n');
+
+test('update: notesToBlocks makes paragraphs, labels and bullets, and drops Install and Notes', () => {
+  assert.deepEqual(notesToBlocks(NOTES), [
+    { kind: 'para', text: 'Earmark 1.3.10 is here.' },
+    { kind: 'label', text: 'New' },
+    { kind: 'bullet', lead: 'Narrator preview', text: 'for cached results' },
+    { kind: 'bullet', lead: 'Faster', text: 'startup' },
+    { kind: 'label', text: 'Fixed' },
+    { kind: 'bullet', lead: '', text: 'A crash when resuming' },
+  ]);
+  assert.deepEqual(notesToBlocks(undefined), []);
+  assert.deepEqual(notesToBlocks(''), []);
+  // A markdown heading is a label too, and bold markers inside a paragraph are stripped.
+  assert.deepEqual(notesToBlocks('## What\'s new\n\n**Faster** startup'), [
+    { kind: 'label', text: "What's new" },
+    { kind: 'para', text: 'Faster startup' },
+  ]);
+});
+
+test('update: whatsNewDecision records first launch, nothing when unchanged, shows on a change', () => {
+  assert.equal(whatsNewDecision('', '1.3.10'), 'record');
+  assert.equal(whatsNewDecision(null, '1.3.10'), 'record');
+  assert.equal(whatsNewDecision('1.3.10', '1.3.10'), 'none');
+  assert.equal(whatsNewDecision('1.3.9', '1.3.10'), 'show');
+  assert.equal(whatsNewDecision('1.4.0', '1.3.10'), 'show');
 });

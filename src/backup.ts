@@ -1,13 +1,17 @@
-// The backup file's shape, plus the pure logic to build, parse, summarise, merge and replace one.
-// Deliberately free of React Native and Expo imports so it runs under the plain Node test runner
-// (test/backup.test.ts). The sync document is carried verbatim, reusing ../sync/merge's parser and
-// merge rather than inventing a second format. Nothing that lives in secure storage is ever read
-// here (or written by the caller): see SECRET_KEYS.
+// The backup and setup file shapes, plus the pure logic to build, parse, summarise, merge and
+// replace them. Deliberately free of React Native and Expo imports so it runs under the plain Node
+// test runner (test/backup.test.ts). A backup carries the sync document verbatim, reusing
+// ../sync/merge's parser and merge rather than inventing a second format; a setup file is the much
+// smaller file one person hands to another. Nothing that lives in secure storage is ever read here
+// (or written by the caller): see SECRET_KEYS.
 
 import { emptyDoc, parseDoc, mergeDocs, SYNC_VERSION, type SyncDoc, type Stamped } from './sync/merge';
 import { validateScraper, type ScraperDef } from './scrapers/engine';
+import { unionNarrators } from './narrators';
+import type { ReadElsewhere } from './reading-history';
 
 export const BACKUP_VERSION = 1;
+export const SETUP_VERSION = 1;
 export const BACKUP_APP = 'earmark';
 
 /** Secure-storage key names. A backup must never mention one of these. */
@@ -21,6 +25,8 @@ export type BackupData = {
   ebookSearchUrl: string;
   readalongServerUrl: string;
   hardcoverLinks: Record<string, unknown>;
+  narrators: string[];
+  readElsewhere: ReadElsewhere[];
 };
 
 export type BackupFile = {
@@ -32,6 +38,29 @@ export type BackupFile = {
   data: BackupData;
 };
 
+/**
+ * The small file behind Settings → Backup → Share my setup: the user's own sources, the disabled
+ * ids and the EPUB search address, nothing else. No progress, book details, ratings, wishlist,
+ * read-alongs, Hardcover links, read-along server URL or secret ever reaches it.
+ */
+export type SetupData = {
+  sources: ScraperDef[];
+  disabled: string[];
+  ebookSearchUrl: string;
+};
+
+export type SetupFile = {
+  app: typeof BACKUP_APP;
+  kind: 'setup';
+  version: number;
+  exportedAt: number;
+  appVersion: string;
+  data: SetupData;
+};
+
+/** A file the Import data row accepts, told apart by `kind`. */
+export type ImportFile = BackupFile | SetupFile;
+
 export type BackupSummary = {
   exportedAt: number;
   appVersion: string;
@@ -41,12 +70,67 @@ export type BackupSummary = {
   wishlist: number;
   readalongs: number;
   sources: number;
+  readElsewhere: number;
+};
+
+export type SetupSummary = {
+  sources: number;
+  search: boolean;
 };
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
 
 export function buildBackup(data: BackupData, appVersion: string, now = Date.now()): BackupFile {
   return { app: BACKUP_APP, kind: 'backup', version: BACKUP_VERSION, exportedAt: now, appVersion, data };
+}
+
+export function buildSetup(data: SetupData, appVersion: string, now = Date.now()): SetupFile {
+  return { app: BACKUP_APP, kind: 'setup', version: SETUP_VERSION, exportedAt: now, appVersion, data };
+}
+
+/** Reads the sources section of a file, rejecting anything an import would not be able to run. */
+function readSources(d: Record<string, unknown>, what: string): ScraperDef[] {
+  const sources: ScraperDef[] = [];
+  if (d.sources === undefined) return sources;
+  if (!Array.isArray(d.sources)) throw new Error(`The ${what}'s sources are malformed`);
+  for (const s of d.sources) {
+    if (!isObj(s)) throw new Error(`The ${what}'s sources are malformed`);
+    try { sources.push(validateScraper(s)); }
+    catch (e: any) { throw new Error(`The ${what} has an invalid source: ${e.message}`); }
+  }
+  return sources;
+}
+
+function readDisabled(d: Record<string, unknown>, what: string): string[] {
+  if (d.disabled === undefined) return [];
+  if (!Array.isArray(d.disabled) || d.disabled.some((x) => typeof x !== 'string')) throw new Error(`The ${what}'s disabled-source list is malformed`);
+  return d.disabled as string[];
+}
+
+/** Followed narrators, read tolerantly: a file from before this feature simply has none. */
+function readNarrators(d: Record<string, unknown>): string[] {
+  if (!Array.isArray(d.narrators)) return [];
+  return d.narrators.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((x) => x.trim());
+}
+
+/** Books read elsewhere, read tolerantly: a file from before this feature has none, junk is dropped. */
+function readReadElsewhere(d: Record<string, unknown>): ReadElsewhere[] {
+  if (!Array.isArray(d.readElsewhere)) return [];
+  const out: ReadElsewhere[] = [];
+  for (const e of d.readElsewhere) {
+    if (!isObj(e)) continue;
+    const source = e.source === 'hardcover' || e.source === 'goodreads' ? e.source : null;
+    const id = typeof e.id === 'string' ? e.id : '';
+    const title = typeof e.title === 'string' ? e.title : '';
+    if (!id || !source || !title) continue;
+    const entry: ReadElsewhere = { id, source, title };
+    if (typeof e.author === 'string' && e.author) entry.author = e.author;
+    if (typeof e.cover === 'string' && e.cover) entry.cover = e.cover;
+    if (typeof e.finishedAt === 'number' && e.finishedAt > 0) entry.finishedAt = e.finishedAt;
+    if (typeof e.rating === 'number' && e.rating >= 0.5) entry.rating = e.rating;
+    out.push(entry);
+  }
+  return out;
 }
 
 /** Reads a backup, throwing a readable error for the wrong file, a newer version or a bad section. */
@@ -61,22 +145,6 @@ export function parseBackup(raw: unknown): BackupFile {
   const d = raw.data;
   if (d.sync !== undefined && !isObj(d.sync)) throw new Error("The backup's sync data is malformed");
 
-  const sources: ScraperDef[] = [];
-  if (d.sources !== undefined) {
-    if (!Array.isArray(d.sources)) throw new Error("The backup's sources are malformed");
-    for (const s of d.sources) {
-      if (!isObj(s)) throw new Error("The backup's sources are malformed");
-      try { sources.push(validateScraper(s)); }
-      catch (e: any) { throw new Error(`The backup has an invalid source: ${e.message}`); }
-    }
-  }
-
-  let disabled: string[] = [];
-  if (d.disabled !== undefined) {
-    if (!Array.isArray(d.disabled) || d.disabled.some((x) => typeof x !== 'string')) throw new Error("The backup's disabled-source list is malformed");
-    disabled = d.disabled as string[];
-  }
-
   // Unknown extra fields are ignored; a missing or wrong-typed section falls back to its empty value.
   return {
     app: BACKUP_APP, kind: 'backup', version: BACKUP_VERSION,
@@ -84,19 +152,58 @@ export function parseBackup(raw: unknown): BackupFile {
     appVersion: typeof raw.appVersion === 'string' ? raw.appVersion : '',
     data: {
       sync: parseDoc(d.sync ?? {}),
-      sources,
-      disabled,
+      sources: readSources(d, 'backup'),
+      disabled: readDisabled(d, 'backup'),
       ebookSearchUrl: typeof d.ebookSearchUrl === 'string' ? d.ebookSearchUrl : '',
       readalongServerUrl: typeof d.readalongServerUrl === 'string' ? d.readalongServerUrl : '',
       hardcoverLinks: isObj(d.hardcoverLinks) ? d.hardcoverLinks : {},
+      narrators: readNarrators(d),
+      readElsewhere: readReadElsewhere(d),
     },
   };
+}
+
+/** Reads a setup file: the user's own sources, the disabled ids and the EPUB search address. */
+export function parseSetup(raw: unknown): SetupFile {
+  if (!isObj(raw)) throw new Error('Not a setup file');
+  if (raw.app !== BACKUP_APP) throw new Error('Not an Earmark setup file');
+  if (raw.kind !== 'setup') throw new Error('This file is not a setup file');
+  const version = typeof raw.version === 'number' ? raw.version : 0;
+  if (version > SETUP_VERSION) throw new Error(`This setup was made by a newer version of Earmark (v${version}); update the app to import it.`);
+  if (!isObj(raw.data)) throw new Error('The setup file has no data');
+
+  const d = raw.data;
+  return {
+    app: BACKUP_APP, kind: 'setup', version: SETUP_VERSION,
+    exportedAt: typeof raw.exportedAt === 'number' ? raw.exportedAt : 0,
+    appVersion: typeof raw.appVersion === 'string' ? raw.appVersion : '',
+    data: {
+      sources: readSources(d, 'setup'),
+      disabled: readDisabled(d, 'setup'),
+      ebookSearchUrl: typeof d.ebookSearchUrl === 'string' ? d.ebookSearchUrl : '',
+    },
+  };
+}
+
+/** Parses whatever Import data was handed, telling a setup file from a backup by its `kind`. */
+export function parseImportFile(raw: unknown): ImportFile {
+  if (!isObj(raw)) throw new Error('Not an Earmark file');
+  if (raw.app !== BACKUP_APP) throw new Error('Not an Earmark backup or setup file');
+  if (raw.kind === 'backup') return parseBackup(raw);
+  if (raw.kind === 'setup') return parseSetup(raw);
+  throw new Error('This file is not an Earmark backup or setup file');
 }
 
 export function parseBackupText(text: string): BackupFile {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e: any) { throw new Error(`Not valid JSON: ${e.message}`); }
   return parseBackup(raw);
+}
+
+export function parseImportFileText(text: string): ImportFile {
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch (e: any) { throw new Error(`Not valid JSON: ${e.message}`); }
+  return parseImportFile(raw);
 }
 
 /** What the import sheet shows before the user chooses Merge or Replace. */
@@ -112,12 +219,33 @@ export function backupSummary(file: BackupFile): BackupSummary {
     wishlist: present(sync.wishlist),
     readalongs: present(sync.readalong),
     sources: file.data.sources.length,
+    readElsewhere: file.data.readElsewhere.length,
+  };
+}
+
+/** What the import sheet shows for a setup file: how many sources, and whether a search address is in it. */
+export function setupSummary(file: SetupFile): SetupSummary {
+  return { sources: file.data.sources.length, search: !!file.data.ebookSearchUrl };
+}
+
+/**
+ * Applies a setup file: sources whose id is not already here are added, existing ones are left
+ * untouched, the disabled list is left alone, and the EPUB search address is filled only when this
+ * device has none.
+ */
+export function mergeSetupData(device: SetupData, file: SetupData): SetupData {
+  const have = new Set(device.sources.map((s) => s.id));
+  return {
+    sources: [...device.sources, ...file.sources.filter((s) => !have.has(s.id))],
+    disabled: device.disabled,
+    ebookSearchUrl: device.ebookSearchUrl || file.ebookSearchUrl,
   };
 }
 
 /** Combine the device's data with a backup: newest record wins, sources added by id, blanks filled. */
 export function mergeBackupData(device: BackupData, file: BackupData): BackupData {
   const have = new Set(device.sources.map((s) => s.id));
+  const readElsewhereIds = new Set(device.readElsewhere.map((e) => e.id));
   return {
     sync: mergeDocs(device.sync, file.sync),
     sources: [...device.sources, ...file.sources.filter((s) => !have.has(s.id))],
@@ -125,6 +253,8 @@ export function mergeBackupData(device: BackupData, file: BackupData): BackupDat
     ebookSearchUrl: device.ebookSearchUrl || file.ebookSearchUrl,
     readalongServerUrl: device.readalongServerUrl || file.readalongServerUrl,
     hardcoverLinks: { ...file.hardcoverLinks, ...device.hardcoverLinks },
+    narrators: unionNarrators(device.narrators, file.narrators),
+    readElsewhere: [...device.readElsewhere, ...file.readElsewhere.filter((e) => !readElsewhereIds.has(e.id))],
   };
 }
 
