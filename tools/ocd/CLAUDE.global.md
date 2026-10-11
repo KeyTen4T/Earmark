@@ -16,6 +16,10 @@ ocd -C /abs/project/dir -f brief.md                      # long brief from a fil
 ```
 
 - Always pass `-C` with an absolute path. Long tasks: `-t 2400`.
+- To cancel a run, stop the `ocd` command (it interrupts the opencode session before it exits and says
+  so), or run `ocd --stop <session id>` / `ocd --stop last`. A session lives in opencode's background
+  service, so killing the opencode client alone, or `kill -9` on `ocd`, leaves it editing files. After a
+  cancel, check `git status` again a minute later before trusting a revert.
 - opencode starts with no knowledge of the conversation: the brief names the goal, files, constraints,
   acceptance criteria and how to verify. Split big jobs into separately verifiable tasks.
 - It runs with permissions auto-approved, so never send it anything destructive or outward-facing

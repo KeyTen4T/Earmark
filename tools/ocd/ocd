@@ -12,10 +12,17 @@ short summary comes back into Claude's context.
   ocd --plan "question about the code"   read-only: investigate, change nothing
   ocd --check "npm test" "task"          after the task, run the check; on failure send the
                                          output back to the same session to fix (--fix-rounds)
+  ocd --stop ses_abc123                  interrupt a session that is still running ("last" = the
+                                         most recent one ocd started)
+
+A session runs inside opencode's background service, not inside this command: killing ocd alone
+leaves the model editing files. So when ocd is stopped (Ctrl-C, SIGTERM, SIGHUP) or its timeout
+runs out, it interrupts the session before it exits. After a SIGKILL, use --stop.
 """
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -39,6 +46,53 @@ def find_cli():
     return which("opencode") or sys.exit("ocd: opencode CLI not found (set OCD_OPENCODE)")
 
 
+class Stopped(Exception):
+    """ocd was told to stop (a signal); the session must be interrupted before leaving."""
+
+
+def _raise_stopped(signum, _frame):
+    raise Stopped(signal.Signals(signum).name)
+
+
+def session_in_log(log):
+    """The session id of a run, from the first event in its log that carries one."""
+    try:
+        for line in open(log):
+            try:
+                sid = json.loads(line).get("sessionID")
+            except ValueError:
+                continue
+            if sid:
+                return sid
+    except OSError:
+        pass
+    return None
+
+
+def interrupt_session(session, workdir=None, env=None):
+    """Ask the background service to stop the session. True when it stopped a running one,
+    None when the session exists but was not running, False when the request failed."""
+    if not session:
+        return False
+    try:
+        p = subprocess.run([find_cli(), "api", "POST", f"/api/session/{session}/interrupt"], cwd=workdir, env=env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    out = p.stdout.replace(" ", "")
+    if p.returncode != 0:
+        return False
+    return True if '"interrupted":true' in out else (None if '"interrupted":false' in out else False)
+
+
+def last_session():
+    try:
+        logs = sorted((os.path.join(LOG_DIR, f) for f in os.listdir(LOG_DIR) if f.endswith(".jsonl")), key=os.path.getmtime)
+    except OSError:
+        return None
+    return session_in_log(logs[-1]) if logs else None
+
+
 def clip(s, n):
     s = str(s).strip()
     return s if len(s) <= n else s[:n] + f"… [+{len(s) - n} chars]"
@@ -58,7 +112,16 @@ def main():
     ap.add_argument("--check", help="shell command run by ocd after the task (e.g. 'npm run typecheck && npm test')")
     ap.add_argument("--fix-rounds", type=int, default=2, help="times to send a failing check back to fix (default 2)")
     ap.add_argument("-v", "--verbose", action="store_true", help="also list every tool call")
+    ap.add_argument("--stop", metavar="SESSION", help="interrupt a running session ('last' = the most recent) and exit")
     a = ap.parse_args()
+
+    if a.stop:
+        sid = last_session() if a.stop == "last" else a.stop
+        if not sid:
+            sys.exit("ocd: no session to stop")
+        ok = interrupt_session(sid)
+        print(f"[ocd {'STOPPED' if ok else 'NOT RUNNING' if ok is None else 'STOP FAILED'}] session={sid}")
+        sys.exit(1 if ok is False else 0)
 
     prompt = " ".join(a.prompt)
     if a.file:
@@ -78,7 +141,12 @@ def main():
     env = dict(os.environ, PWD=workdir)
     t0 = time.time()
 
-    r = run_once(a, prompt, a.session, workdir, env)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _raise_stopped)
+    try:
+        r = run_once(a, prompt, a.session, workdir, env)
+    except Stopped as e:
+        stopped(e, workdir, t0)
     check_ok, check_out, rounds = None, "", 0
     if a.check and not a.plan and r["status"] == "ok":
         while True:
@@ -88,7 +156,10 @@ def main():
             rounds += 1
             fix = (f"The check `{a.check}` failed after your changes. Output (tail):\n\n{check_out}\n\n"
                    "Fix the cause (not the check) and verify it passes.")
-            nxt = run_once(a, fix, r["session"], workdir, env)
+            try:
+                nxt = run_once(a, fix, r["session"], workdir, env)
+            except Stopped as e:
+                stopped(e, workdir, t0)
             for k in ("cost", "tok_in", "tok_out"):
                 nxt[k] += r[k]
             nxt["files"] = r["files"] + [f for f in nxt["files"] if f not in r["files"]]
@@ -130,6 +201,14 @@ def main():
     sys.exit({"ok": 0, "TIMEOUT": 124, "CHECK FAILED": 2}.get(status, 1))
 
 
+def stopped(e, workdir, t0):
+    sid, ok = e.args[1] if len(e.args) > 1 else None, e.args[2] if len(e.args) > 2 else False
+    print(f"[ocd STOPPED] by {e.args[0]} dir={workdir} session={sid} {time.time() - t0:.0f}s "
+          f"session interrupted: {'yes' if ok else 'it was not running' if ok is None and sid else 'no session had started' if not sid else 'NO - run: ocd --stop ' + sid}")
+    print("files it had changed are still on disk; review `git status` before reverting.")
+    sys.exit(130)
+
+
 def run_check(check, workdir, env, timeout):
     try:
         p = subprocess.run(check, shell=True, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
@@ -149,16 +228,29 @@ def run_once(a, prompt, session, workdir, env):
     cmd.append(prompt)
 
     log = os.path.join(LOG_DIR, time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}-{len(os.listdir(LOG_DIR))}.jsonl")
-    timed_out = False
+    timed_out, interrupted = False, None
     with open(log, "w") as out:
+        # stdin must be closed or opencode waits on it forever
+        p = subprocess.Popen(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                             stderr=subprocess.PIPE, text=True)
         try:
-            # stdin must be closed or opencode waits on it forever
-            p = subprocess.run(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=out,
-                               stderr=subprocess.PIPE, text=True, timeout=a.timeout)
-            err = p.stderr
-        except subprocess.TimeoutExpired as e:
+            _, err = p.communicate(timeout=a.timeout)
+        except (subprocess.TimeoutExpired, Stopped) as e:
+            # The session lives in opencode's background service: stop it there first, or it keeps
+            # editing files after this client is gone. Then let go of the client.
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, signal.SIG_IGN)
+            sid = session or session_in_log(log)
+            interrupted = interrupt_session(sid, workdir, env)
+            p.terminate()
+            try:
+                _, err = p.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                _, err = p.communicate()
+            if isinstance(e, Stopped):
+                raise Stopped(e.args[0], sid, interrupted)
             timed_out = True
-            err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
 
     texts, files, cmds, tools, errors = {}, [], [], [], []
     cost, tok_in, tok_out, last_msg = 0.0, 0, 0, None
@@ -198,6 +290,8 @@ def run_once(a, prompt, session, workdir, env):
 
     final = "".join(texts[last_msg]) if texts else ""
     status = "TIMEOUT" if timed_out else ("ERROR" if errors or not final else "ok")
+    if timed_out and interrupted is False:
+        errors.append(f"the session could not be interrupted and may still be running: ocd --stop {session}")
     return dict(status=status, session=session, final=final, files=files, cmds=cmds, tools=tools,
                 errors=errors, stderr=err, cost=cost, tok_in=tok_in, tok_out=tok_out, logs=[log])
 
