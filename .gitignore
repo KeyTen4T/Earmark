@@ -1,0 +1,13 @@
+node_modules/
+.expo/
+android/
+ios/
+dist/
+*.apk
+desktop/node_modules/
+desktop/web/
+desktop/dist/
+__pycache__/
+tools/readalong/*.json
+private/
+.claude/

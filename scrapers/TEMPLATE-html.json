@@ -1,0 +1,24 @@
+{
+  "id": "my-html-site",
+  "name": "My HTML Site",
+  "version": 1,
+  "icon": "🌐",
+  "description": "Template for a site with no API. Replace the URLs and regexes with ones that match your site's HTML.",
+  "baseUrl": "https://example.com",
+  "type": "html",
+  "search": { "url": "https://example.com/search?q={query|urlencode}&page={page}" },
+  "results": {
+    "itemRegex": "<div class=\"result\">.*?<a href=\"(?<href>[^\"]+)\">(?<title>.*?)</a>.*?<span class=\"size\">(?<size>[^<]*)</span>.*?</div>",
+    "flags": "gis",
+    "limit": 40,
+    "fields": {
+      "title": "{title|clean}",
+      "size": "{size|trim}",
+      "detailUrl": "{href|abs}"
+    }
+  },
+  "detail": {
+    "regex": "href=\"(magnet:\\?[^\"]+)\"",
+    "fields": { "magnet": "{1|decode}" }
+  }
+}

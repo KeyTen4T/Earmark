@@ -1,0 +1,22 @@
+{
+  "id": "archive-audio",
+  "name": "Internet Archive Audio",
+  "version": 1,
+  "icon": "🏛️",
+  "description": "Any audiobook/spoken-word item on the Internet Archive (not just LibriVox).",
+  "baseUrl": "https://archive.org",
+  "type": "json",
+  "search": {
+    "url": "https://archive.org/advancedsearch.php?q=mediatype%3Aaudio+AND+subject%3A%28audiobook%29+AND+%28{query|urlencode}%29&fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=creator&fl%5B%5D=item_size&rows=40&page={page}&output=json"
+  },
+  "results": {
+    "path": "response.docs",
+    "fields": {
+      "title": "{title|clean}",
+      "author": "{creator|first}",
+      "cover": "https://archive.org/services/img/{identifier}",
+      "size": "{item_size|bytes}",
+      "torrentUrl": "https://archive.org/download/{identifier}/{identifier}_archive.torrent"
+    }
+  }
+}

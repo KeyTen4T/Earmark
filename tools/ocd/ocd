@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""ocd - delegate a task to opencode (DeepSeek) and print a compact report.
+
+Meant to be called by Claude Code so the bulk of the work (reading files,
+writing code, running commands) is paid for in DeepSeek tokens, and only a
+short summary comes back into Claude's context.
+
+  ocd "task description"                 run in the current directory
+  ocd -C /path/to/project "task"         run in another directory
+  ocd -f brief.md                        read the task from a file ("-" = stdin)
+  ocd -s ses_abc123 "follow-up"          continue an earlier session
+  ocd --plan "question about the code"   read-only: investigate, change nothing
+  ocd --check "npm test" "task"          after the task, run the check; on failure send the
+                                         output back to the same session to fix (--fix-rounds)
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+DEFAULT_MODEL = os.environ.get("OCD_MODEL", "opencode-go/deepseek-v4.1-flash")
+CLI_CANDIDATES = [
+    os.environ.get("OCD_OPENCODE", ""),
+    "/opt/OpenCode/resources/opencode-cli",
+    os.path.expanduser("~/.opencode/bin/opencode"),
+]
+LOG_DIR = os.path.expanduser("~/.cache/ocd")
+PATH_KEYS = ("path", "filePath", "file_path", "file")
+WRITE_TOOLS = ("write", "edit", "patch", "multiedit", "apply_patch")
+
+
+def find_cli():
+    for c in CLI_CANDIDATES:
+        if c and os.access(c, os.X_OK):
+            return c
+    from shutil import which
+    return which("opencode") or sys.exit("ocd: opencode CLI not found (set OCD_OPENCODE)")
+
+
+def clip(s, n):
+    s = str(s).strip()
+    return s if len(s) <= n else s[:n] + f"… [+{len(s) - n} chars]"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("prompt", nargs="*", help="task for opencode")
+    ap.add_argument("-C", "--dir", default=".", help="directory to work in")
+    ap.add_argument("-f", "--file", help="read the task from this file ('-' for stdin)")
+    ap.add_argument("-s", "--session", help="continue this opencode session id")
+    ap.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    ap.add_argument("--plan", action="store_true", help="read-only run (opencode 'plan' agent)")
+    ap.add_argument("--agent", help="opencode agent to use")
+    ap.add_argument("-t", "--timeout", type=int, default=900, help="seconds (default 900)")
+    ap.add_argument("--max-chars", type=int, default=4000, help="cap on the reply text printed")
+    ap.add_argument("--check", help="shell command run by ocd after the task (e.g. 'npm run typecheck && npm test')")
+    ap.add_argument("--fix-rounds", type=int, default=2, help="times to send a failing check back to fix (default 2)")
+    ap.add_argument("-v", "--verbose", action="store_true", help="also list every tool call")
+    a = ap.parse_args()
+
+    prompt = " ".join(a.prompt)
+    if a.file:
+        body = sys.stdin.read() if a.file == "-" else open(a.file).read()
+        prompt = (prompt + "\n\n" + body).strip()
+    if not prompt:
+        ap.error("no task given")
+    if a.plan:
+        prompt += "\n\nDo not modify any files. Investigate and report only."
+    else:
+        prompt += ("\n\nWhen done, finish with a short report: what you changed (files), "
+                   "how you verified it, and anything left undone or uncertain.")
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    # opencode picks its project directory from $PWD, not the real cwd
+    workdir = os.path.realpath(a.dir)
+    env = dict(os.environ, PWD=workdir)
+    t0 = time.time()
+
+    r = run_once(a, prompt, a.session, workdir, env)
+    check_ok, check_out, rounds = None, "", 0
+    if a.check and not a.plan and r["status"] == "ok":
+        while True:
+            check_ok, check_out = run_check(a.check, workdir, env, a.timeout)
+            if check_ok or rounds >= a.fix_rounds:
+                break
+            rounds += 1
+            fix = (f"The check `{a.check}` failed after your changes. Output (tail):\n\n{check_out}\n\n"
+                   "Fix the cause (not the check) and verify it passes.")
+            nxt = run_once(a, fix, r["session"], workdir, env)
+            for k in ("cost", "tok_in", "tok_out"):
+                nxt[k] += r[k]
+            nxt["files"] = r["files"] + [f for f in nxt["files"] if f not in r["files"]]
+            nxt["cmds"] = r["cmds"] + nxt["cmds"]
+            nxt["tools"] = r["tools"] + nxt["tools"]
+            nxt["logs"] = r["logs"] + nxt["logs"]
+            r = nxt
+            if r["status"] != "ok":
+                break
+
+    status = r["status"]
+    if status == "ok" and check_ok is False:
+        status = "CHECK FAILED"
+    print(f"[ocd {status}] dir={workdir} session={r['session']} model={a.model} {time.time() - t0:.0f}s "
+          f"cost=${r['cost']:.4f} tokens={r['tok_in']}in/{r['tok_out']}out tools={len(r['tools'])}")
+    if r["files"]:
+        rel = [os.path.relpath(f, workdir) if os.path.isabs(f) else f for f in r["files"]]
+        print("files changed: " + ", ".join(rel))
+        stat = subprocess.run(["git", "diff", "--stat", "--"] + rel, cwd=workdir, capture_output=True, text=True)
+        if stat.returncode == 0 and stat.stdout.strip():
+            print("diff stat:\n" + stat.stdout.rstrip())
+    if r["cmds"]:
+        print(f"commands run ({len(r['cmds'])}): " + " | ".join(clip(c, 80) for c in r["cmds"][-5:]))
+    if a.verbose:
+        print("tool calls:\n  " + "\n  ".join(r["tools"]))
+    for e in r["errors"][:5]:
+        print("error: " + clip(e, 500))
+    if r["stderr"] and r["stderr"].strip() and r["status"] != "ok":
+        print("stderr: " + clip(r["stderr"], 800))
+    if check_ok is not None:
+        # run by ocd itself, so this is the real result, not the model's account of it
+        print(f"--- check: {'PASS' if check_ok else 'FAIL'} `{a.check}`"
+              + (f" (after {rounds} fix round{'s' if rounds != 1 else ''})" if rounds else ""))
+        if not check_ok:
+            print(check_out)
+    print("--- reply ---")
+    print(clip(r["final"], a.max_chars) if r["final"] else "(no reply text)")
+    print("--- full log: " + " ".join(r["logs"]))
+    sys.exit({"ok": 0, "TIMEOUT": 124, "CHECK FAILED": 2}.get(status, 1))
+
+
+def run_check(check, workdir, env, timeout):
+    try:
+        p = subprocess.run(check, shell=True, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"(check timed out after {timeout}s)"
+    tail = "\n".join((p.stdout + p.stderr).rstrip().splitlines()[-40:])
+    return p.returncode == 0, tail
+
+
+def run_once(a, prompt, session, workdir, env):
+    cmd = [find_cli(), "run", "--auto", "--format", "json", "-m", a.model]
+    if session:
+        cmd += ["-s", session]
+    # always name the agent: a continued session otherwise stays in whatever mode it was in
+    cmd += ["--agent", a.agent or ("plan" if a.plan else "build")]
+    cmd.append(prompt)
+
+    log = os.path.join(LOG_DIR, time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}-{len(os.listdir(LOG_DIR))}.jsonl")
+    timed_out = False
+    with open(log, "w") as out:
+        try:
+            # stdin must be closed or opencode waits on it forever
+            p = subprocess.run(cmd, cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                               stderr=subprocess.PIPE, text=True, timeout=a.timeout)
+            err = p.stderr
+        except subprocess.TimeoutExpired as e:
+            timed_out = True
+            err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+
+    texts, files, cmds, tools, errors = {}, [], [], [], []
+    cost, tok_in, tok_out, last_msg = 0.0, 0, 0, None
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            errors.append(line)
+            continue
+        session = ev.get("sessionID") or session
+        part = ev.get("part") or {}
+        kind = ev.get("type")
+        if kind == "text":
+            texts.setdefault(part.get("messageID"), []).append(part.get("text", ""))
+            last_msg = part.get("messageID")
+        elif kind == "tool_use":
+            tool = part.get("tool", "?")
+            state = part.get("state") or {}
+            inp = state.get("input") or {}
+            target = next((inp[k] for k in PATH_KEYS if inp.get(k)), None)
+            if tool in WRITE_TOOLS and target and target not in files:
+                files.append(target)
+            if inp.get("command"):
+                cmds.append(inp["command"])
+            flag = "" if state.get("status") == "completed" else f" [{state.get('status')}]"
+            tools.append(f"{tool}{flag} {clip(target or inp.get('command') or '', 120)}")
+        elif kind == "step_finish":
+            cost += part.get("cost") or 0
+            tk = part.get("tokens") or {}
+            tok_in += tk.get("input") or 0
+            tok_out += tk.get("output") or 0
+        elif kind == "error":
+            errors.append(json.dumps(ev.get("error") or ev)[:500])
+
+    final = "".join(texts[last_msg]) if texts else ""
+    status = "TIMEOUT" if timed_out else ("ERROR" if errors or not final else "ok")
+    return dict(status=status, session=session, final=final, files=files, cmds=cmds, tools=tools,
+                errors=errors, stderr=err, cost=cost, tok_in=tok_in, tok_out=tok_out, logs=[log])
+
+
+if __name__ == "__main__":
+    main()

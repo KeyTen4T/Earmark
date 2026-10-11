@@ -1,0 +1,30 @@
+# Read-along job service for the Oracle server (A1). Build from tools/readalong/:
+#   docker compose -f server/docker-compose.yml up -d   (add --build after changing the code)
+#
+# It joins the existing Nginx Proxy Manager network and is never published directly; NPM proxies
+# https://readalong.example.org/readalong/ to readalong-server:8080 with a custom location.
+services:
+  readalong-server:
+    build:
+      context: ..  # tools/readalong/, relative to this file
+      dockerfile: server/Dockerfile
+    image: readalong-server:latest
+    container_name: readalong-server
+    restart: unless-stopped
+    env_file:
+      - /opt/readalong-server/readalong.env
+    volumes:
+      # Job queue (SQLite) and temporary audio. Must be writable by uid 10001.
+      - /opt/readalong-server/data:/data
+    # Keep Minecraft's CPU first: two cores max, lowest relative share, 3 GB RAM.
+    cpus: 2
+    cpu_shares: 128
+    mem_limit: 3g
+    networks:
+      - nginx-proxy-manager_default
+    expose:
+      - "8080"
+
+networks:
+  nginx-proxy-manager_default:
+    external: true

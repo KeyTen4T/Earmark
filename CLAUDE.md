@@ -1,0 +1,106 @@
+# Earmark
+
+TorBox audiobook player: one Expo/React Native codebase, built as an Android app and as a Linux
+desktop app (Electron wrapping the web export). `tools/readalong/` is a separate Python tool.
+
+## Current state
+
+Work in progress and open problems are in `tools/readalong/STATUS.md`. Read it before starting.
+
+## Releases and pending work
+
+This repository is public. Never put server addresses, keys, tokens, e-mail addresses or other
+personal details in tracked files; they belong in `private/` (ignored by git), which also holds the
+unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
+in the private `KeyTen4T/Earmark-private`.
+
+- **Current release: 1.3.6** (11 Oct), the first from the public repo. It adds the in-app update
+  check (`src/update.ts`, `src/update-check.ts`), the app icon (`assets/icon/`, drawn to Delta Icons'
+  template), and takes the third-party search addresses out of the code: a previously fetched
+  audiobook source is migrated once into the user's own sources, and the read-along EPUB search
+  address is a per-device setting (Settings → Read-along). None of 1.3.6 has been run on a device;
+  only typecheck and the unit tests.
+- **Earlier**: 1.3.5 narrators and full-cast marks in the sources search (`src/scrapers/cast.ts`) and
+  Cancel during the wait for a read-along EPUB; 1.3.4 five failures made visible (seeder check when
+  TorBox is unreachable, synced settings without a restart, full-disk downloads, unreadable saved
+  data, Hardcover update failures), not run in the app; 1.3.3 ratings and reviews in Discover; 1.3.2
+  the two-pane desktop player (two panes from 900px, no chapters sheet on desktop, Read puts the text
+  on the right) and the fade-away reading screen.
+- **Read-along server**: `tools/readalong/server/` runs on the user's own server behind a reverse
+  proxy; its address and deployment details are in `private/`. To update the tool there, copy the
+  changed files from `tools/readalong/` (`readalong.py`, `server/server.py`, `server/gist.py`) over
+  the server's copies and rebuild the container (`docker compose -f server/docker-compose.yml up -d
+  --build`). A Claude session must never see the server's secrets.
+- **Pending: the desktop PC** has not been updated since before 1.3.0. Keep the old Earmark there
+  closed until 1.3.6 is installed (`gh release download v1.3.6 -R KeyTen4T/Earmark -p '*.deb'`, then
+  the user runs `sudo apt install ./earmark-desktop_1.3.6_amd64.deb`): versions before 1.3.0-beta.6
+  strip the MP3 seek map from a read-along record when they sync it. A source checkout there must be
+  re-cloned from the public repo, never pushed. Still unchecked in the desktop app since 1.3.1: the
+  grid filling the window, Escape closing dialogs then the player, the player bar's speed / sleep /
+  chapters buttons, and the two confirmations (Remove from TorBox, Sign out).
+- **Ideas the user liked, not started**: narrator preview before adding, a finished shelf with the
+  user's own rating (pushed to Hardcover for linked books), export and import of all app data.
+- **Looking at the app without touching TorBox**: `npx expo export --platform web --output-dir <tmp>`,
+  add a `<script>` before the bundle in `index.html` that sets `localStorage['secret:torbox_api_key']`
+  to a dummy value and replaces `fetch` for `api.torbox.app` (`/torrents/mylist` returns fake
+  torrents with `files`, `/torrents/requestdl` a local MP3, everything else an error), and serve the
+  folder on localhost with a server that supports Range requests (`python3 -m http.server` does not).
+
+## Discover ratings and reviews (1.3.3, 10 Oct)
+
+A book's page in Discover (the detail sheet in `src/screens/CatalogSearch.tsx`) shows a rating row
+under the title and, with a Hardcover token set, up to five reviews under the description. Lookup
+and cache are in `src/ratings.ts`; the pure matching, formatting and review parsing are in
+`src/ratings-match.ts` (tests: `test/ratings.test.ts`).
+
+- **Rating**: Open Library search by cleaned title and author, shown only on a clear match (same
+  title, an author surname in common) with at least 3 ratings; otherwise nothing is shown. A
+  translated book can come up empty because Open Library keeps its ratings under the original title
+  (*The Girl with the Dragon Tattoo*). Hardcover's rating is the fallback when a token is set.
+- **Reviews**: Hardcover `user_books` with a review, spoilers excluded, most liked first. The query
+  was written from Hardcover's published schema and never run by a Claude session (it needs the
+  user's token); the user confirmed the feature on the Pixel 7 without saying which parts they saw.
+- **Not done**: no ratings on the browse grid (deliberate: one lookup per opened book only). Ratings
+  are of the book, not the narration. Not run in the packaged desktop app.
+
+## Delegating to opencode
+
+The delegation and round-trip rules are global, in `~/.claude/CLAUDE.md` (source:
+`tools/ocd/CLAUDE.global.md`, installed by `new-machine.sh`). For this project pass
+`--check "npm run typecheck && npm test"`, and never send opencode adding torrents.
+
+## Checks
+
+```bash
+npm run typecheck
+npm test
+```
+
+Pure logic lives in modules with no react-native/expo imports so it runs under the Node test runner:
+`src/sync/merge.ts`, `src/player/recovery.ts`, `src/book-math.ts`, `src/downloads/state.ts`. New test
+files are registered in `test/engine.test.ts`.
+
+## Building
+
+- Desktop: `npm run desktop` (run from source), `npm run desktop:dist` (.deb and AppImage in
+  `desktop/dist/`).
+- Android APK: `npm run apk:local` → `android/app/build/outputs/apk/release/app-release.apk`.
+  Gradle needs Java 17 (the script sets it); the system default Java may lack a compiler.
+- `android/`, `dist/`, `desktop/web/`, `desktop/dist/` are generated and not in git. `android/` comes
+  from `npx expo prebuild --platform android`; keep `expo.version` and `expo.android.versionCode` in
+  `app.json` as the source of truth, and raise `versionCode` on every release or the APK will not
+  install over the previous one.
+- The APK is signed with the stock React Native debug key that prebuild generates, which is the same on
+  every machine, so builds from any computer install over each other.
+
+## Releasing
+
+Bump `version` in `package.json`, `package-lock.json`, `app.json`, `desktop/package.json` and
+`versionCode` in `app.json` (and in `android/app/build.gradle` if `android/` already exists). Build the
+APK and desktop packages, push, then `gh release create vX.Y.Z` with `Earmark-X.Y.Z.apk`, the `.deb`
+and the AppImage attached. Ask the user before pushing or publishing.
+
+## Not verified on a physical phone as of 1.3.1
+
+Offline downloads and stream recovery. New in 1.3.1 and not yet confirmed on the phone: the two
+confirmations, Edit details, Mark as finished, and the accessibility labels under TalkBack. (Phone-side gist sync is in use: read-along records reach the phone through it.)
