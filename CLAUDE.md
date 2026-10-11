@@ -14,7 +14,11 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.7** (11 Oct): the finished shelf. The Library's Finished filter lists books by
+- **Current release: 1.3.8** (11 Oct): after a book is added, the Library re-reads TorBox every 4 s
+  until that book is listed, for up to 3 min (`src/library-poll.ts`). The user had reported new books
+  taking minutes to appear; the cause was inferred from the code, not reproduced, and the fix has not
+  been tried against TorBox.
+- **1.3.7** (11 Oct): the finished shelf. The Library's Finished filter lists books by
   year with the date finished and the user's own half-star rating (`src/shelf.ts`; `finishedAt` and
   `rating` live in `BookMeta` and sync with it). A rating on a book linked to Hardcover is pushed by
   `syncRating` in `src/hardcover.ts`; that mutation has never been run against Hardcover. Versions
