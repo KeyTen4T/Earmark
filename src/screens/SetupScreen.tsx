@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, KeyboardAvoidingView, Platform, Linking } from 'react-native';
+import { View, Text, KeyboardAvoidingView, Platform, Linking } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
-import { Button } from '../components/ui';
+import { Button, Input } from '../components/ui';
 import { verifyKey } from '../torbox';
 import { setApiKey } from '../storage';
 
@@ -45,7 +45,7 @@ export function SetupScreen({ onDone }: { onDone: (key: string) => void }) {
           <Text style={T.label}>TorBox API key</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: R.md, borderWidth: 1, borderColor: err ? C.danger : C.line, paddingHorizontal: 14 }}>
             <Ionicons name="key-outline" size={18} color={C.faint} />
-            <TextInput
+            <Input
               value={key} onChangeText={setKey} placeholder="Paste your key" placeholderTextColor={C.faint} accessibilityLabel="TorBox API key"
               autoCapitalize="none" autoCorrect={false} secureTextEntry onSubmitEditing={save}
               style={{ flex: 1, color: C.text, height: 54, marginLeft: 10, fontSize: 15 }}

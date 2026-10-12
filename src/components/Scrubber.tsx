@@ -28,7 +28,7 @@ export function Scrubber({ position, duration, onSeek }: { position: number; dur
   const shown = drag !== null ? drag * duration : position;
   return (
     <View>
-      <View {...pan.panHandlers} accessible accessibilityRole="adjustable" accessibilityLabel="Position"
+      <View {...pan.panHandlers} focusable={false} accessible accessibilityRole="adjustable" accessibilityLabel="Position"
         accessibilityValue={{ min: 0, max: Math.round(duration || 0), now: Math.round(shown || 0), text: fmtTime(shown) }}
         onLayout={(e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width)} style={{ height: 32, justifyContent: 'center' }}>
         <View pointerEvents="none" style={{ height: drag !== null ? 8 : 5, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.14)', overflow: 'hidden' }}>

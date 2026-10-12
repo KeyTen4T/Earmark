@@ -73,6 +73,12 @@ in the private `KeyTen4T/Earmark-private`.
   changed files from `tools/readalong/` (`readalong.py`, `server/server.py`, `server/gist.py`) over
   the server's copies and rebuild the container (`docker compose -f server/docker-compose.yml up -d
   --build`). A Claude session must never see the server's secrets.
+- **Pending: Android TV** (12 Oct, unreleased, after 1.3.12): the phone APK also installs on a TV.
+  `plugins/withAndroidTV.js` adds the leanback launcher entry, the banner (`assets/icon/tv-banner.svg`)
+  and moves the phone's portrait lock from the manifest into `MainActivity`; `isTV` in `src/layout.ts`
+  forces the wide layout, `Tap` and `Input` in `src/components/ui.tsx` draw the focus ring, and the file
+  pickers, Backup, Share and car mode are hidden on TV. The APK builds and its manifest was inspected;
+  nothing has been run on a TV, and the portrait lock has not been re-checked on a phone.
 - **Pending: the desktop PC** has not been updated since before 1.3.0. Keep the old Earmark there
   closed until 1.3.6 is installed (`gh release download v1.3.6 -R KeyTen4T/Earmark -p '*.deb'`, then
   the user runs `sudo apt install ./earmark-desktop_1.3.6_amd64.deb`): versions before 1.3.0-beta.6

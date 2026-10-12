@@ -1,14 +1,17 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, PanResponder, Platform, ScrollView, Pressable, PressableProps, StyleProp, ViewStyle, Text, View, Modal, StyleSheet, ActivityIndicator, Keyboard, Vibration, useWindowDimensions, Alert } from 'react-native';
+import { Animated, Easing, PanResponder, Platform, ScrollView, Pressable, PressableProps, StyleProp, ViewStyle, Text, TextInput, View, Modal, StyleSheet, ActivityIndicator, Keyboard, Vibration, useWindowDimensions, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, paletteFor, prettyName, pct } from '../theme';
 import { shouldAnimateProgress } from '../player/visibility';
-import { useLayout } from '../layout';
+import { isTV, useLayout } from '../layout';
 import { useEscape } from '../escape';
 
 export type IconName = React.ComponentProps<typeof Ionicons>['name'];
+
+/** Accent ring marking the focused control on a TV; outline is drawn outside the box, so it never shifts layout. */
+export const tvFocusRing: ViewStyle = { outlineWidth: 2, outlineColor: C.accent, outlineOffset: 2, outlineStyle: 'solid' };
 
 /** A short buzz you can feel under your thumb: 'tick' for selections, 'bump' for something that happened. */
 export const haptic = (kind: 'tick' | 'bump' = 'tick') => { try { Vibration.vibrate(kind === 'tick' ? 8 : 18); } catch { /* no vibrator */ } };
@@ -101,6 +104,8 @@ export function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hov
   const v = useRef(new Animated.Value(1)).current;
   // Hover is a desktop nicety only: on a touch screen these never fire, so the mobile look is untouched.
   const [hovered, setHovered] = React.useState(false);
+  // A remote has no hover, so on a TV the same highlight (and the accent ring) marks the focused control.
+  const [focused, setFocused] = React.useState(false);
   const to = (x: number) => Animated.spring(v, { toValue: x, useNativeDriver: true, speed: 40, bounciness: 6 }).start();
   // The style goes on the inner view, but how the button sizes itself within its parent
   // (flex: 1 in a row of tabs, say) has to be on the outer Pressable or it's ignored.
@@ -112,14 +117,29 @@ export function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hov
   const menuProps: any = !onMenu ? null : Platform.OS === 'web'
     ? { onContextMenu: (e: any) => { e.preventDefault(); e.stopPropagation(); onMenu(); } }
     : { onLongPress: () => { haptic('bump'); onMenu(); } };
+  const lit = (hovered || (isTV && focused)) && !rest.disabled;
+  const ring = isTV && focused && !rest.disabled ? tvFocusRing : null;
   return (
     <Pressable {...rest} {...menuProps} accessibilityLabel={accessibilityLabel} accessibilityRole={accessibilityRole} accessibilityState={accessibilityState} style={{ flex, flexGrow, flexShrink, flexBasis, alignSelf }}
       onPress={rest.onPress ? (e) => { if (buzz) haptic(); rest.onPress?.(e); } : undefined}
+      onFocus={(e) => { if (isTV) setFocused(true); rest.onFocus?.(e); }}
+      onBlur={(e) => { if (isTV) setFocused(false); rest.onBlur?.(e); }}
       onHoverIn={(e) => { if (Platform.OS === 'web') setHovered(true); rest.onHoverIn?.(e); }}
       onHoverOut={(e) => { if (Platform.OS === 'web') setHovered(false); rest.onHoverOut?.(e); }}
       onPressIn={(e) => { to(scaleTo); rest.onPressIn?.(e); }} onPressOut={(e) => { to(1); rest.onPressOut?.(e); }}>
-      <Animated.View style={[innerStyle, { transform: [{ scale: v }] }, rest.disabled ? { opacity: 0.45 } : null, hovered && !rest.disabled ? hoverStyle : null]}>{children}</Animated.View>
+      <Animated.View style={[innerStyle, { transform: [{ scale: v }] }, rest.disabled ? { opacity: 0.45 } : null, lit ? hoverStyle : null, ring]}>{children}</Animated.View>
     </Pressable>
+  );
+}
+
+/** A TextInput that shows the accent focus ring when selected with a TV remote. */
+export function Input({ style, ...props }: React.ComponentProps<typeof TextInput>) {
+  const [focused, setFocused] = React.useState(false);
+  return (
+    <TextInput {...props}
+      onFocus={(e) => { setFocused(true); props.onFocus?.(e); }}
+      onBlur={(e) => { setFocused(false); props.onBlur?.(e); }}
+      style={[style, isTV && focused ? tvFocusRing : null]} />
   );
 }
 
@@ -305,11 +325,11 @@ export function Sheet({ visible, onClose, title, children }: { visible: boolean;
     <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
       <View pointerEvents={visible ? 'auto' : 'none'} style={{ flex: 1, justifyContent: wide ? 'center' : 'flex-end', alignItems: wide ? 'center' : undefined }}>
         <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', opacity: open }]}>
-          <Pressable style={{ flex: 1 }} onPress={onClose} />
+          <Pressable style={{ flex: 1 }} onPress={onClose} focusable={false} />
         </Animated.View>
         <Animated.View accessibilityViewIsModal style={[{ backgroundColor: C.surface, borderTopLeftRadius: R.xl, borderTopRightRadius: R.xl, paddingBottom: (kb || insets.bottom) + 12, maxHeight: maxHeight + (kb || 0), borderTopWidth: 1, borderColor: C.line, transform: [{ translateY: slide }] },
           wide && { width: dialogWidth, borderRadius: R.xl, borderWidth: 1, paddingBottom: 20, opacity: open }]}>
-          <View {...(wide ? {} : pan.panHandlers)}>
+          <View focusable={false} {...(wide ? {} : pan.panHandlers)}>
             {wide ? <View style={{ height: 14 }} /> : <View style={{ alignSelf: 'center', width: 40, height: 5, borderRadius: 3, backgroundColor: C.line, marginTop: 10, marginBottom: 8 }} />}
             {last.current.title ? <Text accessibilityRole="header" style={[T.h2, { paddingHorizontal: 20, paddingVertical: 8 }]}>{last.current.title}</Text> : null}
           </View>

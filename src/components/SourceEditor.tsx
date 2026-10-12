@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, TextInput, ScrollView, Modal, Share } from 'react-native';
+import { View, Text, ScrollView, Modal, Share } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
-import { Tap, Button, IconButton, toast, useKeyboardHeight } from './ui';
+import { Tap, Button, IconButton, toast, useKeyboardHeight, Input } from './ui';
 import { useEscape } from '../escape';
+import { isTV } from '../layout';
 import { runSearch, ScraperDef, SearchResult, SearchTrace } from '../scrapers/engine';
 import { parseScrapers } from '../scrapers/importer';
 
@@ -84,7 +85,7 @@ export function SourceEditor({ source, readOnly, isNew, takenIds, onClose, onSav
         <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, paddingBottom: (kb || insets.bottom) + 28, gap: 12 }}>
           <Text style={T.label}>Test a search</Text>
           <View style={{ flexDirection: 'row', gap: 8 }}>
-            <TextInput value={query} onChangeText={setQuery} onSubmitEditing={runTest} returnKeyType="search" accessibilityLabel="Test search query"
+            <Input value={query} onChangeText={setQuery} onSubmitEditing={runTest} returnKeyType="search" accessibilityLabel="Test search query"
               placeholder="e.g. Sherlock Holmes" placeholderTextColor={C.faint} style={[input, { flex: 1, height: 50 }]} />
             <Button kind="ghost" label="Test" icon="flask-outline" loading={test?.busy} disabled={!parsed.def || !query.trim()} onPress={runTest} />
           </View>
@@ -123,7 +124,7 @@ export function SourceEditor({ source, readOnly, isNew, takenIds, onClose, onSav
           ) : null}
 
           <Text style={[T.label, { marginTop: 8 }]}>Definition</Text>
-          <TextInput value={text} onChangeText={setText} editable={!readOnly} multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} accessibilityLabel="Source definition"
+          <Input value={text} onChangeText={setText} editable={!readOnly} multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} accessibilityLabel="Source definition"
             style={[input, { minHeight: 260, textAlignVertical: 'top', fontFamily: 'monospace', fontSize: 12, color: readOnly ? C.sub : C.text }]} />
           {parsed.error ? (
             <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -137,7 +138,7 @@ export function SourceEditor({ source, readOnly, isNew, takenIds, onClose, onSav
           <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
             <Button kind="ghost" icon="copy-outline" label={readOnly ? 'Duplicate to edit' : 'Duplicate'} disabled={!parsed.def}
               onPress={() => parsed.def && onDuplicate(parsed.def)} />
-            <Button kind="ghost" icon="share-outline" label="Share" onPress={() => Share.share({ message: text }).catch(() => {})} />
+            {!isTV && <Button kind="ghost" icon="share-outline" label="Share" onPress={() => Share.share({ message: text }).catch(() => {})} />}
             {dirty && !readOnly ? <Button kind="ghost" icon="arrow-undo-outline" label="Revert" onPress={() => setText(original)} /> : null}
           </View>
           {onRemove ? <Button kind="danger" icon="trash-outline" label="Remove source" onPress={onRemove} /> : null}

@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, ActivityIndicator, Keyboard, ScrollView, Linking, useWindowDimensions, Animated } from 'react-native';
+import { View, Text, ActivityIndicator, Keyboard, ScrollView, Linking, useWindowDimensions, Animated } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer } from 'expo-audio';
 import type { AudioPlayer } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
-import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, FullCastChip } from '../components/ui';
+import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, FullCastChip, Input } from '../components/ui';
 import { CatalogBook, GENRES, searchCatalog, lookupCatalog, topCharts, fullCastShelf, FULL_CAST } from '../catalog';
 import { cleanFullCastTitle } from '../scrapers/cast';
 import { loadBookInfo, type BookInfo, type Rating } from '../ratings';
@@ -200,7 +200,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
         {modeToggle}
         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: R.lg, borderWidth: 1, borderColor: C.line, paddingHorizontal: 14, height: 54 }}>
           <Ionicons name="search" size={20} color={C.faint} />
-          <TextInput value={q} onChangeText={setQ} onSubmitEditing={search} returnKeyType="search" accessibilityLabel="Search audiobooks"
+          <Input value={q} onChangeText={setQ} onSubmitEditing={search} returnKeyType="search" accessibilityLabel="Search audiobooks"
             placeholder="Any audiobook, author or series…" placeholderTextColor={C.faint}
             style={{ flex: 1, color: C.text, fontSize: 16, marginLeft: 10 }} />
           {busy ? <ActivityIndicator color={C.accent} /> : q || searched ? (

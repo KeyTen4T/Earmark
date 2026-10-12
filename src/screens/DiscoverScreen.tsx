@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, TextInput, ActivityIndicator, Keyboard, ScrollView, Alert, Animated, Platform } from 'react-native';
+import { View, Text, ActivityIndicator, Keyboard, ScrollView, Alert, Animated, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, fmtTime } from '../theme';
-import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, FullCastChip } from '../components/ui';
+import { Tap, Cover, Chip, ChipRow, Sheet, Empty, Button, toast, haptic, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, FullCastChip, Input } from '../components/ui';
 import { ScraperDef, SearchResult, runSearch, resolveMagnet, dedupeResults, fetchDetail } from '../scrapers/engine';
 import { isFullCast, selectSourceResults } from '../scrapers/cast';
 import { splitNarrators, isFavourite, resultFavourites, toggleNarrator, favouriteFirst } from '../narrators';
@@ -231,7 +231,7 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
         {modeToggle}
         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: R.lg, borderWidth: 1, borderColor: C.line, paddingHorizontal: 14, height: 54 }}>
           <Ionicons name="search" size={20} color={C.faint} />
-          <TextInput value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" accessibilityLabel="Search sources"
+          <Input value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" accessibilityLabel="Search sources"
             placeholder="Title, author, narrator…" placeholderTextColor={C.faint}
             style={{ flex: 1, color: C.text, fontSize: 16, marginLeft: 10 }} />
           {busy ? <ActivityIndicator color={C.accent} /> : q ? (

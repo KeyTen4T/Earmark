@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, ScrollView, Image, ActivityIndicator, useWindowDimensions } from 'react-native';
+import { View, Text, ScrollView, Image, ActivityIndicator, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { C, R, T } from '../theme';
-import { Tap, Sheet, Button, toast } from './ui';
+import { Tap, Sheet, Button, toast, Input } from './ui';
 import { TBTorrent } from '../torbox';
 import { BookMeta, saveMeta } from '../storage';
 import { COVER_SOURCES, CoverOption, coverQuery } from '../covers';
@@ -69,7 +69,7 @@ export function CoverPicker({ visible, onClose, book, meta, onSaved }: {
       <View style={{ paddingHorizontal: 20, marginBottom: 8 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: R.md, borderWidth: 1, borderColor: C.line, paddingHorizontal: 12, height: 48 }}>
           <Ionicons name="search" size={18} color={C.faint} />
-          <TextInput value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" placeholderTextColor={C.faint} accessibilityLabel="Search covers"
+          <Input value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" placeholderTextColor={C.faint} accessibilityLabel="Search covers"
             placeholder="Title and author" style={{ flex: 1, color: C.text, marginLeft: 8 }} />
           {anyBusy ? <ActivityIndicator color={C.accent} /> : null}
         </View>

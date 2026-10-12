@@ -34,7 +34,8 @@
       ],
       "expo-secure-store",
       "expo-document-picker",
-      "expo-status-bar"
+      "expo-status-bar",
+      "./plugins/withAndroidTV"
     ],
     "web": {
       "bundler": "metro",

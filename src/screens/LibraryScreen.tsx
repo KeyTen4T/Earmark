@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
-import { View, Text, RefreshControl, TextInput, Animated, Platform } from 'react-native';
+import { View, Text, RefreshControl, Animated, Platform } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, paletteFor, fmtApprox, prettyName } from '../theme';
-import { Tap, Cover, Bar, Chip, ChipRow, Sheet, Empty, Button, IconButton, toast, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, confirmAction, type IconName } from '../components/ui';
+import { Tap, Cover, Bar, Chip, ChipRow, Sheet, Empty, Button, IconButton, toast, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, confirmAction, Input, type IconName } from '../components/ui';
 import { TBTorrent, isReady, isStuck, chapterList, addMagnet, deleteTorrent } from '../torbox';
 import { Progress, BookMeta, bookFraction, loadHiddenBooks, saveHiddenBooks, saveMeta, saveProgress, saveReadElsewhere, removeReadElsewhere } from '../storage';
 import { remainingBookSeconds } from '../book-math';
@@ -13,7 +13,7 @@ import { onSyncApplied, syncAfterProgress } from '../sync';
 import { formatBytes } from '../scrapers/template';
 import { usePlayer } from '../player/PlayerContext';
 import { CoverPicker } from '../components/CoverPicker';
-import { useLayout } from '../layout';
+import { useLayout, isTV } from '../layout';
 import { torrentToMagnet } from '../scrapers/bencode';
 import { getDownloads, subscribeDownloads, queueBook, pauseDownload, resumeDownload, removeDownload } from '../downloads';
 import { progressFraction, isComplete, type DownloadBook, type Downloads } from '../downloads/state';
@@ -230,7 +230,10 @@ export function LibraryScreen(props: {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={C.accent} colors={[C.accent]} progressBackgroundColor={C.elevated} />}
       >
         <HeroHeader y={y} label={greet} title="Library" style={{ paddingHorizontal: 20, marginBottom: 18 }}
-          right={<IconButton label="Add a book" name="add" bg={C.elevated} onPress={() => setAddOpen(true)} />} />
+          right={<View style={{ flexDirection: 'row', gap: 8 }}>
+            {wide && <IconButton label="Refresh library" name="refresh" bg={C.elevated} onPress={() => refresh()} />}
+            <IconButton label="Add a book" name="add" bg={C.elevated} onPress={() => setAddOpen(true)} />
+          </View>} />
 
         {!props.loaded ? (
           <View style={{ paddingHorizontal: 20 }} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
@@ -296,6 +299,11 @@ export function LibraryScreen(props: {
                         {b.download_speed ? ` · ${formatBytes(b.download_speed)}/s` : ''}
                       </Text>
                     </View>
+                    {isTV && (
+                      <Tap onPress={(e) => { e.stopPropagation(); setMenu(b); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Options for ${m(b).title ?? prettyName(b.name)}`} style={{ padding: 6 }}>
+                        <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
+                      </Tap>
+                    )}
                   </Tap>
                 ))}
               </View>
@@ -324,7 +332,7 @@ export function LibraryScreen(props: {
               <View style={{ paddingHorizontal: 20, marginBottom: 14, maxWidth: 720 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: R.lg, borderWidth: 1, borderColor: C.line, paddingHorizontal: 14, height: 54 }}>
                   <Ionicons name="search" size={20} color={C.faint} />
-                  <TextInput value={query} onChangeText={setQuery} returnKeyType="search" accessibilityLabel="Search your library"
+                  <Input value={query} onChangeText={setQuery} returnKeyType="search" accessibilityLabel="Search your library"
                     placeholder="Search your library" placeholderTextColor={C.faint}
                     style={{ flex: 1, color: C.text, fontSize: 16, marginLeft: 10 }} />
                   {query ? (
@@ -549,7 +557,7 @@ function LabeledInput({ label, value, onChangeText, placeholder }: {
   return (
     <View style={{ gap: 6 }}>
       <Text style={T.label}>{label}</Text>
-      <TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={C.faint} accessibilityLabel={label}
+      <Input value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={C.faint} accessibilityLabel={label}
         style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
     </View>
   );
@@ -584,11 +592,11 @@ function AddMagnetSheet({ visible, onClose, token, onAdded }: { visible: boolean
   return (
     <Sheet visible={visible} onClose={onClose} title="Add a book">
       <View style={{ paddingHorizontal: 20, gap: 12, paddingTop: 4 }}>
-        <TextInput value={text} onChangeText={setText} placeholder="magnet:?xt=urn:btih:…" placeholderTextColor={C.faint} accessibilityLabel="Magnet link"
+        <Input value={text} onChangeText={setText} placeholder="magnet:?xt=urn:btih:…" placeholderTextColor={C.faint} accessibilityLabel="Magnet link"
           autoCapitalize="none" autoCorrect={false} multiline
           style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, minHeight: 90, maxHeight: 160, textAlignVertical: 'top', borderWidth: 1, borderColor: C.line }} />
         <Button label="Add to TorBox" icon="cloud-download-outline" onPress={add} loading={busy} disabled={!text.trim()} />
-        <Button kind="ghost" label="Choose a .torrent file" icon="document-attach-outline" onPress={addFile} disabled={busy} />
+        {!isTV && <Button kind="ghost" label="Choose a .torrent file" icon="document-attach-outline" onPress={addFile} disabled={busy} />}
         <Text style={[T.small, { textAlign: 'center' }]}>Or find one in Discover → My sources and send it straight to TorBox.</Text>
       </View>
     </Sheet>

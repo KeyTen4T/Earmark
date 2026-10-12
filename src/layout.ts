@@ -4,11 +4,14 @@ import { Platform, useWindowDimensions } from 'react-native';
 export const SIDEBAR_WIDTH = 236;
 /** Side padding the desktop shell puts around each screen. */
 export const DESKTOP_GUTTER = 16;
+/** Android TV: a landscape, remote-driven screen that takes the desktop layout. */
+export const isTV = Platform.OS === 'android' && Platform.isTV;
 
 export function useLayout() {
   const { width, height } = useWindowDimensions();
   // A narrow desktop window falls back to the phone layout rather than squeezing the sidebar in.
-  const wide = Platform.OS === 'web' && width >= 900;
+  // A TV always takes the wide layout: the phone one relies on touch (drag sheets, swipe rows).
+  const wide = isTV || (Platform.OS === 'web' && width >= 900);
   return {
     wide,
     width,

@@ -63,6 +63,8 @@ import './backup.test.ts';
 import './preview.test.ts';
 // The car-mode screen's chapter line and current-file progress/remaining time are pure.
 import './car-mode.test.ts';
+// The Android TV config plugin's manifest transform is a pure function.
+import './android-tv-plugin.test.ts';
 
 test('sha1 matches node crypto across lengths', () => {
   for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 1000, 70000]) {

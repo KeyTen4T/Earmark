@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, Text, ScrollView, Switch, TextInput, Linking, useWindowDimensions, Animated, Platform, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Switch, Linking, useWindowDimensions, Animated, Platform, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
 import app from '../../app.json';
-import { Tap, Sheet, Button, Chip, toast, IconName, IconButton, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction } from '../components/ui';
+import { Tap, Sheet, Button, Chip, toast, IconName, IconButton, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction, Input, tvFocusRing } from '../components/ui';
 import type { ScraperDef } from '../scrapers/engine';
 import { pickScraperFiles, fetchScrapers, parseScrapers, EXAMPLE_SCRAPER } from '../scrapers/importer';
 import { makeBackupFile, makeSetupFile, pickImportFile, applyBackupFile, applySetupFile, exportBackupFile } from '../backup-io';
@@ -31,6 +31,7 @@ import { getDownloads, subscribeDownloads, totalBytesUsed, removeAllDownloads } 
 import { formatBytes } from '../scrapers/template';
 import type { Downloads } from '../downloads/state';
 import { toggleNarrator } from '../narrators';
+import { isTV } from '../layout';
 
 export function SettingsScreen({ builtins, userScrapers, disabled, narrators, library, readElsewhere, onScrapers, onDisabled, onNarrators, onReadElsewhere, onImported, onSignOut, bottomPad }: {
   builtins: ScraperDef[];
@@ -263,7 +264,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
                   <Text style={{ fontSize: 18 }}>{s.icon ?? '🔎'}</Text></View>}
                 title={s.name}
                 sub={`${builtinIds.has(s.id) ? 'Built-in' : 'Imported'} · ${s.type.toUpperCase()}${s.version ? ` · v${s.version}` : ''}`}
-                right={<Switch value={on} onValueChange={(v) => toggle(s.id, v)} accessibilityLabel={`Enable ${s.name}`}
+                right={<FocusSwitch value={on} onValueChange={(v) => toggle(s.id, v)} accessibilityLabel={`Enable ${s.name}`}
                   trackColor={{ false: C.line, true: C.accent }} thumbColor={C.text}
                   {...({ activeThumbColor: C.text, activeTrackColor: C.accent } as any)} />} />
             );
@@ -271,7 +272,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
         </Section>
         <Text style={[T.small, { marginTop: -12, marginBottom: 12 }]}>Tap a source to edit it and test searches.</Text>
         <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-          <Button label="Import file" icon="document-attach-outline" onPress={importFile} style={{ flex: 1 }} />
+          {!isTV && <Button label="Import file" icon="document-attach-outline" onPress={importFile} style={{ flex: 1 }} />}
           <Button kind="ghost" label="New" icon="add" onPress={newSource} style={{ flex: 1 }} />
         </View>
         <View style={{ flexDirection: 'row', gap: 8, marginBottom: 26 }}>
@@ -309,23 +310,29 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
         </Section>
 
         <Section title="Backup">
-          <Row onPress={exportData}
-            left={<Badge icon="download-outline" color="#4ADE80" />}
-            title="Export data"
-            sub="Save progress, ratings, sources and settings to a file"
-            right={backupBusy === 'export' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
-          <Row onPress={shareSetup}
-            left={<Badge icon="share-social-outline" color="#4ADE80" />}
-            title="Share my setup"
-            sub="A file with your sources and search address, for another person"
-            right={backupBusy === 'setup' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
-          <Row last onPress={pickImport}
-            left={<Badge icon="cloud-upload-outline" color="#4ADE80" />}
-            title="Import data"
-            sub="Restore from a backup or setup file"
-            right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+          {isTV ? (
+            <Text style={[T.body, { padding: 14 }]}>Backups are made from the phone or desktop app.</Text>
+          ) : (
+            <>
+              <Row onPress={exportData}
+                left={<Badge icon="download-outline" color="#4ADE80" />}
+                title="Export data"
+                sub="Save progress, ratings, sources and settings to a file"
+                right={backupBusy === 'export' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+              <Row onPress={shareSetup}
+                left={<Badge icon="share-social-outline" color="#4ADE80" />}
+                title="Share my setup"
+                sub="A file with your sources and search address, for another person"
+                right={backupBusy === 'setup' ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+              <Row last onPress={pickImport}
+                left={<Badge icon="cloud-upload-outline" color="#4ADE80" />}
+                title="Import data"
+                sub="Restore from a backup or setup file"
+                right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+            </>
+          )}
         </Section>
-        <Text style={[T.small, { marginTop: -12, marginBottom: 12 }]}>Keys and tokens are never included in a backup or setup file.</Text>
+        {!isTV && <Text style={[T.small, { marginTop: -12, marginBottom: 12 }]}>Keys and tokens are never included in a backup or setup file.</Text>}
 
         <Section title="Read-along">
           <Row onPress={() => setRaOpen(true)}
@@ -404,7 +411,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
 
       <Sheet visible={!!importMode} onClose={() => setImportMode(null)} title={importMode === 'url' ? 'Import from URL' : 'Paste scraper JSON'}>
         <View style={{ paddingHorizontal: 20, gap: 12 }}>
-          <TextInput value={importText} onChangeText={setImportText} autoCapitalize="none" autoCorrect={false} accessibilityLabel={importMode === 'url' ? 'Scraper URL' : 'Scraper JSON'}
+          <Input value={importText} onChangeText={setImportText} autoCapitalize="none" autoCorrect={false} accessibilityLabel={importMode === 'url' ? 'Scraper URL' : 'Scraper JSON'}
             multiline={importMode === 'paste'} placeholder={importMode === 'url' ? 'https://…/scraper.json' : '{ "id": "…", … }'} placeholderTextColor={C.faint}
             style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line, minHeight: importMode === 'paste' ? Math.min(180, pasteMax) : 52, maxHeight: importMode === 'paste' ? pasteMax : 120, textAlignVertical: 'top', fontFamily: importMode === 'paste' ? 'monospace' : undefined, fontSize: 13 }} />
           <Button label="Import" icon="download-outline" onPress={importOther} loading={busy} disabled={!importText.trim()} />
@@ -459,7 +466,7 @@ function AiKeySheet({ visible, onClose, provider, onProvider }: { visible: boole
         ) : (
           <>
             <Text style={T.body}>Paste an API key from Gemini, Groq or Grok and Surprise me will choose books based on your listening history instead of at random. The key is stored only on this device. Using it sends the titles, authors and progress of your library to that service.</Text>
-            <TextInput value={key} onChangeText={setKey} placeholder="Gemini, Groq (gsk_…) or Grok (xai-…) key" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="AI API key"
+            <Input value={key} onChangeText={setKey} placeholder="Gemini, Groq (gsk_…) or Grok (xai-…) key" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="AI API key"
               style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
             <Button label="Connect" icon="link" onPress={connect} loading={busy} disabled={!key.trim()} />
             <Text onPress={() => Linking.openURL('https://aistudio.google.com/apikey')} style={[T.small, { textAlign: 'center', color: C.accent }]}>Get a free Gemini key</Text>
@@ -495,7 +502,7 @@ function HardcoverSheet({ visible, onClose, user, onUser }: { visible: boolean; 
         ) : (
           <>
             <Text style={T.body}>Paste your API token from hardcover.app → Settings → API. It is stored only on this device.</Text>
-            <TextInput value={tok} onChangeText={setTok} placeholder="Token" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="Hardcover API token"
+            <Input value={tok} onChangeText={setTok} placeholder="Token" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="Hardcover API token"
               style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
             <Button label="Connect" icon="link" onPress={connect} loading={busy} disabled={!tok.trim()} />
             <Text onPress={() => Linking.openURL('https://hardcover.app/account/api')} style={[T.small, { textAlign: 'center', color: C.accent }]}>Open hardcover.app/account/api</Text>
@@ -567,8 +574,12 @@ function ReadingHistorySheet({ visible, onClose, library, existing, onReadElsewh
             <Text style={T.body}>Finished these books on another service? Import them and they join the Finished shelf. Nothing is written until you confirm.</Text>
             <Button label="From Hardcover" icon="bookmarks-outline" onPress={() => load('hardcover')} loading={busy === 'hardcover'} disabled={hasToken !== true || busy !== null} />
             {hasToken === false ? <Text style={T.small}>Connect Hardcover above first.</Text> : null}
-            <Button kind="ghost" label="From a Goodreads export" icon="document-attach-outline" onPress={() => load('goodreads')} loading={busy === 'goodreads'} disabled={busy !== null} />
-            <Text style={T.small}>Goodreads: Account → My Books → Import/Export → Export Library.</Text>
+            {!isTV && (
+              <>
+                <Button kind="ghost" label="From a Goodreads export" icon="document-attach-outline" onPress={() => load('goodreads')} loading={busy === 'goodreads'} disabled={busy !== null} />
+                <Text style={T.small}>Goodreads: Account → My Books → Import/Export → Export Library.</Text>
+              </>
+            )}
           </>
         )}
         {error ? <Text style={[T.small, { color: C.danger }]}>{error}</Text> : null}
@@ -610,7 +621,7 @@ function SyncSheet({ visible, onClose, status }: { visible: boolean; onClose: ()
         ) : (
           <>
             <Text style={T.body}>Sync listening progress, covers, hidden books, your Want to listen list and playback settings between this device and your other one.</Text>
-            <TextInput value={token} onChangeText={setToken} placeholder="GitHub token (gist scope)" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="GitHub token"
+            <Input value={token} onChangeText={setToken} placeholder="GitHub token (gist scope)" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="GitHub token"
               style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
             <Button icon="link" label="Connect" onPress={connect} loading={busy} disabled={!token.trim()} />
             <Text style={T.small}>Create a token at github.com/settings/tokens with only the “gist” scope, then use the same token on your other device.</Text>
@@ -679,9 +690,9 @@ function ReadalongServerSheet({ visible, onClose, onChanged }: {
     <Sheet visible={visible} onClose={onClose} title="Read-along server">
       <View style={{ paddingHorizontal: 20, gap: 12 }}>
         <Text style={T.body}>Build read-alongs on an always-on computer instead of this device. The URL and token come from the server’s setup; nothing else changes while it is unset.</Text>
-        <TextInput value={url} onChangeText={setUrl} placeholder="https://readalong.example.org/readalong" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" accessibilityLabel="Read-along server URL"
+        <Input value={url} onChangeText={setUrl} placeholder="https://readalong.example.org/readalong" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" accessibilityLabel="Read-along server URL"
           style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
-        <TextInput value={token} onChangeText={setToken} placeholder={hasToken ? 'Token saved — type to replace' : 'API token'} placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="Read-along server token"
+        <Input value={token} onChangeText={setToken} placeholder={hasToken ? 'Token saved — type to replace' : 'API token'} placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} secureTextEntry accessibilityLabel="Read-along server token"
           style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
         {result ? <Text style={[T.small, { color: result.kind === 'ok' ? C.good : C.danger }]}>{result.text}</Text> : null}
         <Button label="Save" icon="save-outline" onPress={save} loading={busy === 'save'} disabled={!url.trim()} />
@@ -723,7 +734,7 @@ function EbookSearchSheet({ visible, onClose, onChanged }: {
     <Sheet visible={visible} onClose={onClose} title="EPUB search address">
       <View style={{ paddingHorizontal: 20, gap: 12 }}>
         <Text style={T.body}>Where Earmark looks for a book’s EPUB when building a read-along. It is stored only on this device; leave it empty to turn EPUB search off.</Text>
-        <TextInput value={url} onChangeText={setUrl} placeholder="https://…/ebook/search" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" accessibilityLabel="EPUB search address"
+        <Input value={url} onChangeText={setUrl} placeholder="https://…/ebook/search" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" accessibilityLabel="EPUB search address"
           style={{ backgroundColor: C.bg, color: C.text, borderRadius: R.md, padding: 14, borderWidth: 1, borderColor: C.line }} />
         {result ? <Text style={[T.small, { color: result.kind === 'ok' ? C.good : C.danger }]}>{result.text}</Text> : null}
         <Button label="Save" icon="save-outline" onPress={save} />
@@ -828,6 +839,16 @@ function Badge({ icon, color }: { icon: IconName; color: string }) {
   return (
     <View style={{ width: 38, height: 38, borderRadius: 10, backgroundColor: color + '26', alignItems: 'center', justifyContent: 'center' }}>
       <Ionicons name={icon} size={19} color={color} />
+    </View>
+  );
+}
+
+/** A Switch wrapped so a TV remote's focus shows the accent ring; a phone never sees it. */
+function FocusSwitch(props: React.ComponentProps<typeof Switch>) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <View style={isTV && focused ? tvFocusRing : null}>
+      <Switch {...props} onFocus={(e) => { setFocused(true); props.onFocus?.(e); }} onBlur={(e) => { setFocused(false); props.onBlur?.(e); }} />
     </View>
   );
 }

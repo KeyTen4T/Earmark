@@ -8,10 +8,10 @@
 // launches), so reopening the sheet shows its progress.
 
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { ActivityIndicator, FlatList, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, FlatList, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { C, R, T, prettyName } from '../theme';
-import { Bar, Button, Sheet, Tap, confirmAction, toast } from './ui';
+import { Bar, Button, Sheet, Tap, confirmAction, toast, Input } from './ui';
 import { readalongBridge, type ReadalongStatus } from '../readalong/desktop';
 import { chapterTitle, type TBTorrent, type TBFile } from '../torbox';
 import type { BookMeta } from '../storage';
@@ -285,7 +285,7 @@ export function ReadalongSheet({ visible, onClose, book, meta, chapters, index }
         <View style={{ paddingHorizontal: 20 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: R.md, borderWidth: 1, borderColor: C.line, paddingHorizontal: 12, height: 48 }}>
             <Ionicons name="search" size={18} color={C.faint} />
-            <TextInput value={query} onChangeText={setQuery} onSubmitEditing={research} returnKeyType="search" accessibilityLabel="Book title"
+            <Input value={query} onChangeText={setQuery} onSubmitEditing={research} returnKeyType="search" accessibilityLabel="Book title"
               placeholder="Book title" placeholderTextColor={C.faint}
               style={{ flex: 1, color: C.text, marginLeft: 8 }} />
             {searching ? <ActivityIndicator color={C.accent} /> : null}

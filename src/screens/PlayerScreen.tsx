@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, Modal, FlatList, ScrollView, useWindowDimensions, ActivityIndicator, TextInput, Image, Animated, Platform, AppState } from 'react-native';
+import { View, Text, Modal, FlatList, ScrollView, useWindowDimensions, ActivityIndicator, Image, Animated, Platform, AppState } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, paletteFor, fmtTime, fmtApprox, prettyName } from '../theme';
-import { Tap, Cover, Sheet, Button, IconButton, toast, Pop, FadeIn, SkipIcon } from '../components/ui';
+import { Tap, Cover, Sheet, Button, IconButton, toast, Pop, FadeIn, SkipIcon, Input } from '../components/ui';
 import { Scrubber } from '../components/Scrubber';
 import { usePlayer } from '../player/PlayerContext';
 import { remainingBookSeconds } from '../book-math';
@@ -25,7 +25,7 @@ import { serverConfigured } from '../readalong/server';
 import { checkPendingForBook } from '../readalong/background';
 import { jobActive } from '../readalong/job';
 import { subscribeSyncStatus } from '../sync';
-import { useLayout } from '../layout';
+import { useLayout, isTV } from '../layout';
 import { useEscape } from '../escape';
 import { playerPanes } from '../player/panes';
 import { CarMode } from './CarMode';
@@ -113,9 +113,10 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   const { height } = useWindowDimensions();
   // Inside an Android Modal neither the app-level insets nor SafeAreaView reliably report the
   // navigation bar, and a three-button bar (48dp) then covers the bottom row. Reserve at least that
-  // much on Android whatever the insets say; on gesture phones it is just a little extra space.
+  // much on Android whatever the insets say; on gesture phones it is just a little extra space. A TV
+  // has no navigation bar, so it keeps the desktop-like inset only.
   const appInsets = useSafeAreaInsets();
-  const bottomPad = 16 + Math.max(appInsets.bottom, Platform.OS === 'android' ? 48 : 0);
+  const bottomPad = 16 + Math.max(appInsets.bottom, !isTV && Platform.OS === 'android' ? 48 : 0);
   const { dialogWidth: width, wide, width: windowWidth } = useLayout(); // the player is a centred column on desktop
   const [sheet, setSheet] = useState<null | 'chapters' | 'speed' | 'sleep' | 'hardcover' | 'cover' | 'readalong'>(null);
   const [chaptersSignal, setChaptersSignal] = useState(0); // bumped to scroll the desktop pane to the current chapter
@@ -343,8 +344,9 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         </Text>
       </View>
       {/* The car-mode entry sits with the Chapters button on the phone header's right; the desktop
-          bar has no car mode, so it stays a spacer to keep the two layouts' titles on the same line. */}
-      {desktop ? <View style={{ width: 42 }} /> : (
+          bar has no car mode, so it stays a spacer to keep the two layouts' titles on the same line.
+          A TV takes the desktop bar and can never reach car mode. */}
+      {desktop || isTV ? <View style={{ width: 42 }} /> : (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <IconButton label="Car mode" name="car-sport-outline" onPress={() => setCarMode(true)} size={22} />
           <IconButton label="Chapters" name="list" onPress={() => setSheet('chapters')} size={22} />
@@ -684,7 +686,7 @@ function HardcoverLinkSheet({ visible, onClose, link, error, torrentId, defaultQ
       <View style={{ paddingHorizontal: 20, marginBottom: 8 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: R.md, borderWidth: 1, borderColor: C.line, paddingHorizontal: 12, height: 48 }}>
           <Ionicons name="search" size={18} color={C.faint} />
-          <TextInput value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" placeholderTextColor={C.faint} accessibilityLabel="Search Hardcover"
+          <Input value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" placeholderTextColor={C.faint} accessibilityLabel="Search Hardcover"
             placeholder="Search Hardcover" style={{ flex: 1, color: C.text, marginLeft: 8 }} />
           {busy ? <ActivityIndicator color={C.accent} /> : null}
         </View>
