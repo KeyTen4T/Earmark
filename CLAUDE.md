@@ -14,7 +14,22 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.12** (11 Oct): Discover → All audiobooks has a "Full cast" shelf
+- **Current release: 1.3.13** (12 Oct): Android TV, the in-app installer, and dense read-along
+  timing (see `tools/readalong/STATUS.md`). None of the three has been run on a device.
+  - Android TV: the phone APK also installs on a TV. `plugins/withAndroidTV.js` adds the leanback
+    launcher entry, the banner (`assets/icon/tv-banner.svg`) and moves the phone's portrait lock from
+    the manifest into `MainActivity`; `isTV` in `src/layout.ts` forces the wide layout, `Tap` and
+    `Input` in `src/components/ui.tsx` draw the focus ring, and the file pickers, Backup, Share and car
+    mode are hidden on TV. The portrait lock has not been re-checked on a phone.
+  - In-app installer: on Android "Update" downloads the APK into the cache, checks it against the
+    release asset's size and the ZIP magic, and opens the system installer through
+    `expo-intent-launcher` (`src/update-install.ts` pure logic and controller, glue in `src/update.ts`;
+    needs `REQUEST_INSTALL_PACKAGES`). It replaces handing the APK link to a browser, which downloaded
+    the file and never installed it (cause inferred from the code, not reproduced). Versions up to
+    1.3.12 still have the old button, so the step to 1.3.13 is a manual install.
+  - `npm run apk:local` needs `ANDROID_HOME` (e.g. `~/Android/Sdk`) when `android/local.properties`
+    is absent.
+- **1.3.12** (11 Oct): Discover → All audiobooks has a "Full cast" shelf
   (`fullCastShelf`/`mergeFullCast` in `src/catalog.ts`; `cleanFullCastTitle` in `src/scrapers/cast.ts`
   for "Search my sources"), and the sources search has a "Full cast" filter chip. The shelf was run in
   a browser against Apple's real catalogue (164 books); the filter chip is covered by tests only.
@@ -73,18 +88,6 @@ in the private `KeyTen4T/Earmark-private`.
   changed files from `tools/readalong/` (`readalong.py`, `server/server.py`, `server/gist.py`) over
   the server's copies and rebuild the container (`docker compose -f server/docker-compose.yml up -d
   --build`). A Claude session must never see the server's secrets.
-- **Pending: Android TV** (12 Oct, unreleased, after 1.3.12): the phone APK also installs on a TV.
-  `plugins/withAndroidTV.js` adds the leanback launcher entry, the banner (`assets/icon/tv-banner.svg`)
-  and moves the phone's portrait lock from the manifest into `MainActivity`; `isTV` in `src/layout.ts`
-  forces the wide layout, `Tap` and `Input` in `src/components/ui.tsx` draw the focus ring, and the file
-  pickers, Backup, Share and car mode are hidden on TV. The APK builds and its manifest was inspected;
-  nothing has been run on a TV, and the portrait lock has not been re-checked on a phone.
-- **Pending: in-app installer** (12 Oct, unreleased): on Android "Update" downloads the APK into the
-  cache, checks it against the release asset's size and the ZIP magic, and opens the system installer
-  through `expo-intent-launcher` (`src/update-install.ts` pure logic and controller, glue in
-  `src/update.ts`; needs `REQUEST_INSTALL_PACKAGES`). It replaces handing the APK link to a browser,
-  which downloaded the file and never installed it (cause inferred from the code, not reproduced). The
-  APK builds with the permission and file provider; the install has never been run on a device.
 - **Pending: the desktop PC** has not been updated since before 1.3.0. Keep the old Earmark there
   closed until 1.3.6 is installed (`gh release download v1.3.6 -R KeyTen4T/Earmark -p '*.deb'`, then
   the user runs `sudo apt install ./earmark-desktop_1.3.6_amd64.deb`): versions before 1.3.0-beta.6
