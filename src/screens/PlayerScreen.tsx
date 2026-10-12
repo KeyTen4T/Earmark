@@ -253,8 +253,10 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   // desktop two-pane split (that pane renders `controls(true)`, always full size).
   const reading = showText && !!readalongRecord;
   // Immersive reading is eligible only in the full player, with the text showing and no sheet open.
-  // Car mode is a separate full-screen layer, so the fade is suspended while it is up.
-  const chromeActive = visible && (reading || showingText) && sheet === null && !carMode;
+  // Car mode is a separate full-screen layer, so the fade is suspended while it is up. Not on a TV:
+  // only a touch (or, on the web, the mouse and keys) brings the chrome back, and a remote sends
+  // neither, so the controls would be gone for good.
+  const chromeActive = visible && (reading || showingText) && sheet === null && !carMode && !isTV;
   const { hidden: chromeHidden, collapsed: chromeCollapsed, opacity: chromeOpacity, poke: chromePoke, revealedAt } = useIdleChrome(chromeActive);
 
   // The touch that reveals the chrome must not also seek (paragraphs are tap-to-seek). `touchHidden`

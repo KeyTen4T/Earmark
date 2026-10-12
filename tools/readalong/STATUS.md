@@ -14,7 +14,7 @@ Released without two checks, at the user's call: a long background listening ses
 build (the crash fix was measured over five minutes, not a full session), and updating the desktop PC,
 whose old app strips the seek map from a record when it syncs it (see below).
 
-## 12 Oct 2026 (laptop): dense alignment, committed, not released
+## 12 Oct 2026 (laptop): dense alignment, released in 1.3.13
 
 - **Symptom**: on Harry Potter (Opus, so not the MP3 seek problem) the highlight trails or runs ahead
   of the narrator by a few seconds, on phone and desktop.
@@ -34,8 +34,15 @@ whose old app strips the seek map from a record when it syncs it (see below).
 - **Confirmed by the user on the laptop** (`npm run desktop`, Harry Potter rebuilt on the GPU, 251 of
   261 chunks matched): "it sounds right and the tracking is super accurate". Not yet heard on the
   phone, which is still on 1.3.12 without the app-side changes.
-- **Not done**: the server still runs the old tool, so a build started from the phone has the old
-  timing; a server build of a long book will take hours. `--rest N` (idle N times the transcription
+- **The server runs the dense tool** since the afternoon of 12 Oct: only `readalong.py` differed, the
+  image was rebuilt and the container recreated (healthy). The previous image is kept there as
+  `readalong-server:before-dense`. No dense build has run on it yet; a long book will take hours, and
+  it uses `base.en`, so its timing may be a little looser than a laptop build.
+- **Android TV (1.3.14)**: the fade-away reading screen is off on a TV, because only a touch (or the
+  web's mouse and keys) brings the chrome back and a remote sends neither. Worked out from the code;
+  the read-along has never been opened on a TV. Unchecked there: whether moving the focus through
+  paragraphs with the remote counts as scrolling by hand and pauses following.
+- **Not done**: `--rest N` (idle N times the transcription
   time after each piece; `EARMARK_READALONG_REST` for the desktop app, off by default) was added for
   fan noise and has never been run in a real build.
 - **Cost**: about 100 KB of record for an 8.5 h book, 270 KB for 23 h, and the whole sync document
