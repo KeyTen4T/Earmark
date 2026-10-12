@@ -19,7 +19,7 @@ import {
   loadFavNarrators, saveFavNarrators, loadReadElsewhere,
   Progress, BookMeta,
 } from './src/storage';
-import { checkForUpdate, openUpdate, currentVersion, setKnownUpdate, fetchReleaseNotes } from './src/update';
+import { checkForUpdate, startUpdate, clearInstalledUpdates, currentVersion, setKnownUpdate, fetchReleaseNotes } from './src/update';
 import { shouldAutoCheck, summary, notesToBlocks, whatsNewDecision, type NoteBlock } from './src/update-check';
 import { ADD_POLL_MS, NOT_WAITING, awaitAdded, settleAwaited, stillWaiting } from './src/library-poll';
 import { fillMissingCovers } from './src/covers';
@@ -162,6 +162,7 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   useEffect(() => {
     if (!loaded || updateChecked.current) return;
     updateChecked.current = true;
+    clearInstalledUpdates();
     void (async () => {
       if (await showWhatsNew()) return;
       try {
@@ -172,8 +173,9 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
         setKnownUpdate(release);
         if ((await loadDismissedUpdate()) === release.version) return;
         const body = `${summary(release.notes, 6)}\nYou have ${currentVersion()}.`;
-        if (await confirmAction(`Earmark ${release.version} is available`, body, 'Download')) openUpdate(release);
-        else await saveDismissedUpdate(release.version);
+        if (await confirmAction(`Earmark ${release.version} is available`, body, Platform.OS === 'android' ? 'Update' : 'Download')) {
+          if (startUpdate(release)) toast('Downloading the update…'); // the install module reports any failure
+        } else await saveDismissedUpdate(release.version);
       } catch { /* a failed check is silent */ }
     })();
   }, [loaded]);

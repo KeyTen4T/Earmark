@@ -50,6 +50,8 @@ import './idle-chrome.test.ts';
 import './stored-json.test.ts';
 // The update check's version ordering, release parsing and note summary are pure.
 import './update.test.ts';
+// The in-app Android installer's state, verification and fake-driven controller are pure.
+import './update-install.test.ts';
 // The finished shelf: year grouping, finish dates and half-star rating taps are pure.
 import './shelf.test.ts';
 // Importing a reading history from Hardcover or a Goodreads export: matching and the pure plan.

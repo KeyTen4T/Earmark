@@ -4,7 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T } from '../theme';
 import app from '../../app.json';
-import { Tap, Sheet, Button, Chip, toast, IconName, IconButton, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction, Input, tvFocusRing } from '../components/ui';
+import { Tap, Sheet, Button, Chip, toast, IconName, IconButton, useKeyboardHeight, HeroHeader, StickyBar, useScrollY, FadeIn, confirmAction, Input, tvFocusRing, Bar } from '../components/ui';
 import type { ScraperDef } from '../scrapers/engine';
 import { pickScraperFiles, fetchScrapers, parseScrapers, EXAMPLE_SCRAPER } from '../scrapers/importer';
 import { makeBackupFile, makeSetupFile, pickImportFile, applyBackupFile, applySetupFile, exportBackupFile } from '../backup-io';
@@ -19,8 +19,9 @@ import {
   loadEbookSearchUrl, saveEbookSearchUrl,
   saveDismissedUpdate, loadRemovedReadElsewhere,
 } from '../storage';
-import { checkForUpdate, openUpdate, currentVersion, knownUpdate, setKnownUpdate, subscribeUpdate } from '../update';
+import { checkForUpdate, startUpdate, cancelUpdate, currentVersion, knownUpdate, setKnownUpdate, subscribeUpdate, getInstallState, subscribeInstall } from '../update';
 import { summary, type Release } from '../update-check';
+import { progressFraction, progressLabel, type InstallState } from '../update-install';
 import { testServer, normalizeServerUrl } from '../readalong/server';
 import { isHttpUrl } from '../readalong/ebookSearch';
 import { fetchMe, setHcToken, getHcToken, cachedMe, fetchHardcoverHistory, HcUser } from '../hardcover';
@@ -71,6 +72,8 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
   const [checking, setChecking] = useState(false);
   const [known, setKnown] = useState<Release | null>(() => knownUpdate());
   useEffect(() => subscribeUpdate(() => setKnown(knownUpdate())), []);
+  const [installState, setInstallState] = useState<InstallState>(() => getInstallState());
+  useEffect(() => subscribeInstall(setInstallState), []);
   useEffect(() => { getAiKey().then((k) => setAiProvider(k ? providerFor(k) : null)); }, []);
   const [raOpen, setRaOpen] = useState(false);
   const [raServer, setRaServer] = useState<{ url: string; token: boolean } | null>(null);
@@ -241,7 +244,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
       if (!newer) { toast(`Earmark ${currentVersion()} is the latest version`); return; }
       setKnownUpdate(release);
       const body = `${summary(release.notes, 6)}\nYou have ${currentVersion()}.`;
-      if (await confirmAction(`Earmark ${release.version} is available`, body, 'Download')) openUpdate(release);
+      if (await confirmAction(`Earmark ${release.version} is available`, body, Platform.OS === 'android' ? 'Update' : 'Download')) startUpdate(release);
       else await saveDismissedUpdate(release.version);
     } catch (e: any) {
       toast(e.message ?? 'Could not check for updates', 'err');
@@ -389,11 +392,17 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
         </Section>
 
         <Section title="Updates">
-          <Row last onPress={checkUpdates}
+          <Row last={installState.phase === 'idle'} onPress={checkUpdates}
             left={<Badge icon="cloud-download-outline" color={C.accent} />}
             title="Check for updates"
             sub={checking ? 'Checking…' : known ? `${known.version} available` : `Earmark ${app.expo.version}`}
             right={checking ? <ActivityIndicator color={C.accent} /> : <Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+          {installState.phase !== 'idle' && (
+            <UpdateStatus install={installState} release={known}
+              onRetry={() => { if (known) startUpdate(known); }}
+              onCancel={cancelUpdate}
+              onOpenPage={() => { if (known) void Linking.openURL(known.pageUrl); }} />
+          )}
         </Section>
 
         <Text style={[T.small, { textAlign: 'center', marginTop: 8 }]}>Earmark {app.expo.version} · streams from your own TorBox account</Text>
@@ -438,6 +447,42 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
       <EbookSearchSheet visible={ebookOpen} onClose={() => setEbookOpen(false)} onChanged={reloadEbookUrl} />
       <NarratorsSheet visible={narratorsOpen} onClose={() => setNarratorsOpen(false)} narrators={narrators} onNarrators={onNarrators} />
       <ImportBackupSheet visible={!!importData} file={importData} busy={backupBusy} onClose={() => setImportData(null)} onMerge={() => applyImport('merge')} onReplace={() => applyImport('replace')} onAdd={addSetup} />
+    </View>
+  );
+}
+
+/** The live state of an in-app Android update, shown under the Updates row. */
+function UpdateStatus({ install, release, onRetry, onCancel, onOpenPage }: {
+  install: InstallState; release: Release | null;
+  onRetry: () => void; onCancel: () => void; onOpenPage: () => void;
+}) {
+  if (install.phase === 'failed') {
+    return (
+      <View style={{ padding: 14, gap: 10 }}>
+        <Text style={[T.body, { color: C.danger }]}>{install.message}</Text>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <Button kind="ghost" label="Try again" icon="refresh" onPress={onRetry} disabled={!release} style={{ flex: 1 }} />
+          <Button kind="ghost" label="Open release page" icon="open-outline" onPress={onOpenPage} disabled={!release} style={{ flex: 1 }} />
+        </View>
+      </View>
+    );
+  }
+  const name = release ? `Earmark ${release.version}` : 'the update';
+  if (install.phase === 'downloading') {
+    const percent = progressLabel(install.received, install.total);
+    return (
+      <View style={{ padding: 14, gap: 10 }}>
+        <Text style={T.body}>{`Downloading ${name}…${percent ? ` ${percent}` : ''}`}</Text>
+        <Bar value={progressFraction(install.received, install.total)} />
+        <Button kind="ghost" label="Cancel" icon="close" onPress={onCancel} />
+      </View>
+    );
+  }
+  return (
+    <View style={{ padding: 14, gap: 10 }}>
+      <Text style={T.body}>{install.phase === 'verifying' ? `Verifying ${name}…` : `Opening the installer for ${name}…`}</Text>
+      <ActivityIndicator color={C.accent} />
+      {install.phase === 'verifying' && <Button kind="ghost" label="Cancel" icon="close" onPress={onCancel} />}
     </View>
   );
 }

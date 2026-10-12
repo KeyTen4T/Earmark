@@ -6,6 +6,8 @@ export type Release = {
   notes: string;
   pageUrl: string;
   apkUrl?: string;
+  /** The APK asset's byte size from GitHub, when the asset lists one. */
+  apkSize?: number;
   debUrl?: string;
   appImageUrl?: string;
 };
@@ -51,18 +53,27 @@ export function parseRelease(json: unknown): Release | null {
   if (typeof r.html_url !== 'string' || !r.html_url) return null;
   if (r.assets !== undefined && !Array.isArray(r.assets)) return null;
 
-  const urlFor = (ext: string) => {
+  const assetFor = (ext: string): Record<string, unknown> | undefined => {
     for (const a of (r.assets as unknown[]) ?? []) {
-      const u = a && typeof a === 'object' ? (a as Record<string, unknown>).browser_download_url : null;
-      if (typeof u === 'string' && u.toLowerCase().endsWith(ext)) return u;
+      if (!a || typeof a !== 'object') continue;
+      const asset = a as Record<string, unknown>;
+      const u = asset.browser_download_url;
+      if (typeof u === 'string' && u.toLowerCase().endsWith(ext)) return asset;
     }
     return undefined;
   };
+  const urlFor = (ext: string): string | undefined => {
+    const u = assetFor(ext)?.browser_download_url;
+    return typeof u === 'string' ? u : undefined;
+  };
+  const apk = assetFor('.apk');
+  const apkSize = apk && typeof apk.size === 'number' && apk.size > 0 ? apk.size : undefined;
   return {
     version: `${m[1]}.${m[2]}.${m[3]}`,
     notes: typeof r.body === 'string' ? r.body : '',
     pageUrl: r.html_url,
     apkUrl: urlFor('.apk'),
+    apkSize,
     debUrl: urlFor('.deb'),
     appImageUrl: urlFor('.appimage'),
   };

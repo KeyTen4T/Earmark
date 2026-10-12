@@ -11,9 +11,9 @@ const FIXTURE = JSON.parse(`{
   "prerelease": false,
   "html_url": "https://github.com/KeyTen4T/Earmark/releases/tag/v1.4.0",
   "assets": [
-    { "name": "Earmark-1.4.0.apk", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/Earmark-1.4.0.apk" },
-    { "name": "Earmark-1.4.0.AppImage", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/Earmark-1.4.0.AppImage" },
-    { "name": "earmark-desktop_1.4.0_amd64.deb", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/earmark-desktop_1.4.0_amd64.deb" },
+    { "name": "Earmark-1.4.0.apk", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/Earmark-1.4.0.apk", "size": 73400320 },
+    { "name": "Earmark-1.4.0.AppImage", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/Earmark-1.4.0.AppImage", "size": 90000000 },
+    { "name": "earmark-desktop_1.4.0_amd64.deb", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/earmark-desktop_1.4.0_amd64.deb", "size": 80000000 },
     { "name": "checksums.txt", "browser_download_url": "https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/checksums.txt" }
   ]
 }`);
@@ -25,6 +25,7 @@ test('update: parseRelease reads the version, notes and asset URLs', () => {
   assert.match(r!.notes, /Faster/);
   assert.equal(r!.pageUrl, 'https://github.com/KeyTen4T/Earmark/releases/tag/v1.4.0');
   assert.equal(r!.apkUrl, 'https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/Earmark-1.4.0.apk');
+  assert.equal(r!.apkSize, 73400320);
   assert.equal(r!.debUrl, 'https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/earmark-desktop_1.4.0_amd64.deb');
   assert.equal(r!.appImageUrl, 'https://github.com/KeyTen4T/Earmark/releases/download/v1.4.0/Earmark-1.4.0.AppImage');
 });
@@ -45,8 +46,20 @@ test('update: parseRelease tolerates a release with no assets', () => {
   const r = parseRelease({ tag_name: 'v2.0.0', html_url: 'https://example/release', body: '', assets: [] });
   assert.equal(r?.version, '2.0.0');
   assert.equal(r?.apkUrl, undefined);
+  assert.equal(r?.apkSize, undefined);
   assert.equal(r?.debUrl, undefined);
   assert.equal(r?.appImageUrl, undefined);
+});
+
+test('update: parseRelease ignores a missing or nonsensical APK size', () => {
+  const withSize = (size: unknown) => ({
+    tag_name: 'v2.0.0', html_url: 'https://example/release', body: '',
+    assets: [{ browser_download_url: 'https://example/Earmark-2.0.0.apk', size }],
+  });
+  assert.equal(parseRelease(withSize(1024))?.apkSize, 1024);
+  assert.equal(parseRelease(withSize('1024'))?.apkSize, undefined);
+  assert.equal(parseRelease(withSize(0))?.apkSize, undefined);
+  assert.equal(parseRelease(withSize(-5))?.apkSize, undefined);
 });
 
 test('update: compareVersions orders X.Y.Z with an optional v and pre-release', () => {

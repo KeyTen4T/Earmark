@@ -79,6 +79,12 @@ in the private `KeyTen4T/Earmark-private`.
   forces the wide layout, `Tap` and `Input` in `src/components/ui.tsx` draw the focus ring, and the file
   pickers, Backup, Share and car mode are hidden on TV. The APK builds and its manifest was inspected;
   nothing has been run on a TV, and the portrait lock has not been re-checked on a phone.
+- **Pending: in-app installer** (12 Oct, unreleased): on Android "Update" downloads the APK into the
+  cache, checks it against the release asset's size and the ZIP magic, and opens the system installer
+  through `expo-intent-launcher` (`src/update-install.ts` pure logic and controller, glue in
+  `src/update.ts`; needs `REQUEST_INSTALL_PACKAGES`). It replaces handing the APK link to a browser,
+  which downloaded the file and never installed it (cause inferred from the code, not reproduced). The
+  APK builds with the permission and file provider; the install has never been run on a device.
 - **Pending: the desktop PC** has not been updated since before 1.3.0. Keep the old Earmark there
   closed until 1.3.6 is installed (`gh release download v1.3.6 -R KeyTen4T/Earmark -p '*.deb'`, then
   the user runs `sudo apt install ./earmark-desktop_1.3.6_amd64.deb`): versions before 1.3.0-beta.6

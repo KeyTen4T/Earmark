@@ -1,7 +1,13 @@
-// In-app update check against the public GitHub releases of EarMark. No token is sent.
+// In-app update check against the public GitHub releases of EarMark. No token is sent. On Android
+// the update is downloaded in-app and handed to the system package installer; elsewhere the release
+// page opens in the browser.
 import { Linking, Platform } from 'react-native';
+import { Directory, File, FileMode, Paths } from 'expo-file-system';
+import * as IntentLauncher from 'expo-intent-launcher';
 import app from '../app.json';
 import { parseRelease, updateAvailable, type Release } from './update-check';
+import { createInstallController, installedApkNames, type InstallDownload, type InstallState } from './update-install';
+import { toast } from './components/ui';
 
 const API = 'https://api.github.com/repos/KeyTen4T/Earmark/releases/latest';
 
@@ -24,10 +30,122 @@ export async function checkForUpdate(): Promise<{ release: Release; newer: boole
   }
 }
 
-/** Android hands the APK to the browser to download; elsewhere open the release page. */
-export function openUpdate(release: Release): void {
-  const url = (Platform.OS === 'android' ? release.apkUrl : undefined) ?? release.pageUrl;
-  if (url) void Linking.openURL(url);
+// ---- The Android in-app installer ----
+
+// The APK is downloaded into the cache directory. expo-file-system's FileProvider covers
+// <cache-path path="." />, so the file can be shared as a content:// URI with read permission.
+const INSTALL_PACKAGE = 'android.intent.action.INSTALL_PACKAGE';
+const INSTALL_MIME = 'application/vnd.android.package-archive';
+const FLAG_GRANT_READ_URI_PERMISSION = 1;
+const installerArgs = (uri: string) => ({
+  data: uri,
+  type: INSTALL_MIME,
+  flags: FLAG_GRANT_READ_URI_PERMISSION,
+  extra: {
+    'android.intent.extra.RETURN_RESULT': true,
+    'android.intent.extra.NOT_UNKNOWN_SOURCE': false,
+  },
+});
+
+function cacheFile(name: string): File {
+  return new File(Paths.cache, name);
+}
+
+async function downloadApk({ url, name, onProgress, signal }: InstallDownload): Promise<void> {
+  const dest = cacheFile(name);
+  if (dest.exists) dest.delete(); // a leftover from an interrupted attempt would block the download
+  const task = File.createDownloadTask(url, dest, {
+    onProgress: ({ bytesWritten, totalBytes }) => onProgress(bytesWritten, totalBytes),
+    signal,
+  });
+  const file = await task.downloadAsync();
+  if (!file) throw new Error('The update download was interrupted.');
+}
+
+function apkSizeOnDisk(name: string): number | null {
+  try { const f = cacheFile(name); return f.exists ? f.size : null; } catch { return null; }
+}
+
+async function readApkHead(name: string, length: number): Promise<Uint8Array | null> {
+  try {
+    const f = cacheFile(name);
+    if (!f.exists) return null;
+    const handle = f.open(FileMode.ReadOnly);
+    try { return handle.readBytes(length); } finally { handle.close(); }
+  } catch { return null; }
+}
+
+async function apkContentUri(name: string): Promise<string> {
+  return cacheFile(name).contentUri;
+}
+
+/** Hands the content URI to the system installer; if there is no INSTALL_PACKAGE handler (some TVs), VIEW still reaches it. */
+async function launchInstaller(uri: string): Promise<number> {
+  try {
+    const res = await IntentLauncher.startActivityAsync(INSTALL_PACKAGE, installerArgs(uri));
+    return res.resultCode;
+  } catch {
+    const res = await IntentLauncher.startActivityAsync('android.intent.action.VIEW', installerArgs(uri));
+    return res.resultCode;
+  }
+}
+
+// One installer for the whole app: Settings and the startup prompt both drive this.
+let installState: InstallState = { phase: 'idle' };
+const installListeners = new Set<(s: InstallState) => void>();
+const notifyInstall = () => { for (const l of installListeners) l(installState); };
+
+export const getInstallState = (): InstallState => installState;
+
+export function subscribeInstall(fn: (s: InstallState) => void): () => void {
+  installListeners.add(fn);
+  fn(installState);
+  return () => { installListeners.delete(fn); };
+}
+
+const installer = createInstallController({
+  listCache: () => {
+    try { return new Directory(Paths.cache).list().map((e) => e.name); } catch { return []; }
+  },
+  deleteFile: (name) => { try { const f = cacheFile(name); if (f.exists) f.delete(); } catch { /* ignore */ } },
+  download: downloadApk,
+  fileSize: apkSizeOnDisk,
+  readHead: readApkHead,
+  contentUri: apkContentUri,
+  launchInstaller,
+  openPage: (url) => { void Linking.openURL(url); },
+  onState: (s) => { installState = s; notifyInstall(); },
+  toast: (text, kind) => toast(text, kind),
+});
+
+/** At start: drop the APK of an update that has since been installed, so it does not sit in the cache. */
+export function clearInstalledUpdates(): void {
+  if (Platform.OS !== 'android') return;
+  try {
+    const names = new Directory(Paths.cache).list().map((e) => e.name);
+    for (const name of installedApkNames(names, currentVersion())) cacheFile(name).delete();
+  } catch { /* nothing to clear */ }
+}
+
+/** Stops a download in progress (the cache file is cleaned up on the next attempt). */
+export function cancelUpdate(): void {
+  installer.cancel();
+}
+
+/**
+ * Where an update goes from here. Non-Android (or a release with no APK) opens the release page as
+ * before. On Android this starts the in-app download+installer and returns true when a new download
+ * began; false when the page opened instead or one was already running.
+ */
+export function startUpdate(release: Release): boolean {
+  if (Platform.OS !== 'android' || !release.apkUrl) {
+    void Linking.openURL(release.pageUrl);
+    return false;
+  }
+  const phase = installState.phase;
+  if (phase === 'downloading' || phase === 'verifying' || phase === 'installing') return false;
+  void installer.start(release);
+  return true;
 }
 
 /**
