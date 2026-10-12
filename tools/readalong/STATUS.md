@@ -14,6 +14,33 @@ Released without two checks, at the user's call: a long background listening ses
 build (the crash fix was measured over five minutes, not a full session), and updating the desktop PC,
 whose old app strips the seek map from a record when it syncs it (see below).
 
+## 12 Oct 2026 (laptop): dense alignment, committed, not released
+
+- **Symptom**: on Harry Potter (Opus, so not the MP3 seek problem) the highlight trails or runs ahead
+  of the narrator by a few seconds, on phone and desktop.
+- **Cause**: the tool heard a 20 s clip per minute and the app interpolated by word count between
+  anchors 30-60 s apart; the narrator's pace is not uniform.
+- **Change**: `readalong.py anchors` defaults to `--mode dense`: the whole audio in 120 s chunks
+  (3 s overlap), every token aligned to the book with `difflib`, anchors on the first and last heard
+  word of every paragraph and at most 15 s apart. Same `[t, para, word]` triples, `timing` 2, so old
+  apps read it. `--mode sampled` is the old behaviour. In the app, `locate`/`timeForWord`
+  binary-search, a dense record (`isDenseRecord`, 3+ anchors a minute) holds a paragraph until the
+  next one's first-word anchor, the tick is 100 ms, and the Read sheet says when a record has the
+  older timing.
+- **Measured** on LibriVox *Pride and Prejudice* ch. 1-3 (18:53, GPU `small.en`, fake TorBox), new
+  `check` with clips off the chunk grid: dense median 0.08 s, p90 0.29 s, max 0.75 s; sampled median
+  1.05 s, p90 2.56 s, max 3.14 s. 76% of paragraphs got an anchor on their first word. This compares
+  Whisper with Whisper, so a bias shared by both runs would not show; nobody has listened to it.
+- **Confirmed by the user on the laptop** (`npm run desktop`, Harry Potter rebuilt on the GPU, 251 of
+  261 chunks matched): "it sounds right and the tracking is super accurate". Not yet heard on the
+  phone, which is still on 1.3.12 without the app-side changes.
+- **Not done**: the server still runs the old tool, so a build started from the phone has the old
+  timing; a server build of a long book will take hours. `--rest N` (idle N times the transcription
+  time after each piece; `EARMARK_READALONG_REST` for the desktop app, off by default) was added for
+  fan noise and has never been run in a real build.
+- **Cost**: about 100 KB of record for an 8.5 h book, 270 KB for 23 h, and the whole sync document
+  is uploaded on every progress sync (up to once a minute while playing).
+
 ## 10 Oct 2026 (laptop): text vanished after scrolling far by hand
 
 - **Symptom**: with Read on, scrolling the text a long way back or forward by hand made *all* the

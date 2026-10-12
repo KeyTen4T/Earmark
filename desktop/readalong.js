@@ -150,6 +150,10 @@ function runJob({ python, script, workDir, torboxKey, hash, fileIds, title, para
   if (ids && ids.length) args.push('--file-ids', ids.join(','));
   args.push('--paragraphs', paragraphsPath, '--out', outPath,
     '--download', '--audio-dir', audioDir, '--progress-json');
+  // EARMARK_READALONG_REST=2 idles between pieces so a laptop's fans stay down; a build then takes
+  // about three times as long. Off by default.
+  const rest = Number(process.env.EARMARK_READALONG_REST ?? 0);
+  if (Number.isFinite(rest) && rest > 0) args.push('--rest', String(rest));
 
   let child;
   try {

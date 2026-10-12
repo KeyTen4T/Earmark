@@ -29,7 +29,9 @@ const CURRENT_VIEW_POSITION = 0.33; // keep the current paragraph about a third 
 // Look this far ahead of playback so a paragraph highlights as the narrator starts it.
 const HIGHLIGHT_LEAD_SECONDS = 0.3;
 // Recompute the highlight faster than the player's status updates; the clock is extrapolated.
-const HIGHLIGHT_TICK_MS = 250;
+// The tick only re-renders when the paragraph actually changes (see the effect below), so 100 ms is
+// cheap and keeps a paragraph switch within ~0.1 s of the first-word anchor.
+const HIGHLIGHT_TICK_MS = 100;
 // Any scroll within this long of a programmatic scroll is treated as ours, not the reader's.
 const PROGRAMMATIC_MS = 1000;
 const INITIAL_RENDER = 40; // covers the ~30 rows above the current paragraph in a fresh window
@@ -153,9 +155,10 @@ export function ReadalongView({ audioHash, record, fileId, clock, onSeek, onMana
     return () => sub.remove();
   }, []);
 
-  // The paragraph under the playhead, recomputed every 250 ms from an extrapolated position (not on
-  // every status tick). The 0.3 s lead moves the highlight on as the narrator starts a paragraph.
-  // While the app is not active the tick is stopped, then resumed with an immediate recompute.
+  // The paragraph under the playhead, recomputed every HIGHLIGHT_TICK_MS from an extrapolated
+  // position (not on every status tick). The 0.3 s lead moves the highlight on as the narrator
+  // starts a paragraph. While the app is not active the tick is stopped, then resumed with an
+  // immediate recompute.
   useEffect(() => {
     if (!source || phase !== 'ready' || !hasAnchors) { setCurrent(null); setLocated(false); return; }
     if (!appActive) return;

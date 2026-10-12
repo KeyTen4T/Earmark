@@ -5,7 +5,7 @@ import { zipSync, strToU8 } from 'fflate';
 import { parseEpub, paragraphsSha1, utf8Bytes } from '../src/readalong/epub';
 import {
   normalizeWords, buildWordIndex, fromAnchorsJson, locate, timeForWord, paragraphStartWord,
-  withTimingCorrection,
+  withTimingCorrection, isDenseRecord,
   type ReadalongRecord,
 } from '../src/readalong/anchors';
 import { paragraphSource, findEpubTorrent } from '../src/readalong/source';
@@ -268,6 +268,76 @@ test('timeForWord returns null without a file or anchors, and holds a single anc
   const single: ReadalongRecord = { ...r, files: [{ id: 7, duration: 30, anchors: [[10, 1, 25]] }] };
   assert.equal(timeForWord(single, 7, 0), 10);
   assert.equal(timeForWord(single, 7, 100), 10);
+});
+
+// --------------------------------------------------------------------------------------
+// Dense records: an anchor on every paragraph boundary, and isDenseRecord
+// --------------------------------------------------------------------------------------
+
+// Two anchors per paragraph of 20 words: t = the word's own start time.
+function denseRecord(): ReadalongRecord {
+  return {
+    epub: { hash: 'h', fileId: 7, title: 'T', paragraphs: 3, paragraphsSha1: 's' },
+    files: [{
+      id: 7, duration: 30,
+      anchors: [
+        [0, 0, 0], [9.5, 0, 19],
+        [10, 1, 20], [19.5, 1, 39],
+        [20, 2, 40], [29.5, 2, 59],
+      ],
+    }],
+    timing: 2,
+    created: 0,
+  };
+}
+
+test('isDenseRecord separates sampled (1-2/min) from dense records', () => {
+  const sampled: ReadalongRecord = {
+    epub: { hash: 'h', fileId: 7, title: 'T', paragraphs: 10, paragraphsSha1: 's' },
+    files: [{ id: 7, duration: 600, anchors: Array.from({ length: 10 }, (_, i) => [i * 60, i, i * 20]) }],
+    timing: 2, created: 0,
+  };
+  assert.equal(isDenseRecord(sampled), false);
+  assert.equal(isDenseRecord(denseRecord()), true); // 6 anchors in 30 s
+  // A missing duration or no anchors can never be dense.
+  assert.equal(isDenseRecord({ ...sampled, files: [{ id: 7, duration: 0, anchors: [[0, 0, 0]] }] }), false);
+  assert.equal(isDenseRecord({ ...sampled, files: [{ id: 7, duration: 600, anchors: [] }] }), false);
+});
+
+test('dense locate switches paragraph exactly at the first-word anchor, not before', () => {
+  const r = denseRecord();
+  assert.equal(locate(r, wordToPara, 7, 10)!.para, 1);        // exactly at the anchor
+  assert.equal(locate(r, wordToPara, 7, 10 - 0.001)!.para, 0); // just before it stays on the last
+  assert.equal(locate(r, wordToPara, 7, 9.5)!.para, 0);       // the previous paragraph's last anchor
+  assert.equal(locate(r, wordToPara, 7, 20)!.para, 2);
+  assert.equal(locate(r, wordToPara, 7, 20 - 0.001)!.para, 1);
+});
+
+test('dense tap-to-seek returns the paragraph first-word anchor time', () => {
+  const r = denseRecord();
+  // paragraph 1 starts at word 20, anchored at t = 10; paragraph 2 at word 40, t = 20.
+  assert.equal(timeForWord(r, 7, paragraphStartWord(wordToPara, 1)), 10);
+  assert.equal(timeForWord(r, 7, paragraphStartWord(wordToPara, 2)), 20);
+});
+
+test('locate and timeForWord binary-search a long dense record', () => {
+  // 6000 anchors, one every 10 words (t = k * 0.5), three paragraphs of 20000 words.
+  const n = 6000;
+  const anchors = Array.from({ length: n }, (_, k) => [k * 0.5, Math.floor((k * 10) / 20000), k * 10]);
+  const words = Array.from({ length: n * 10 }, (_, w) => Math.min(2, Math.floor(w / 20000)));
+  const big: ReadalongRecord = {
+    epub: { hash: 'h', fileId: 7, title: 'T', paragraphs: 3, paragraphsSha1: 's' },
+    files: [{ id: 7, duration: anchors[n - 1][0] + 1, anchors }],
+    timing: 2, created: 0,
+  };
+  for (const k of [0, 1, 1234, 4321, n - 1]) {
+    assert.equal(locate(big, words, 7, anchors[k][0])!.para, anchors[k][1], `locate k=${k}`);
+    assert.equal(timeForWord(big, 7, anchors[k][2]), anchors[k][0], `timeForWord k=${k}`);
+  }
+  // Midway between two anchors interpolates the word, staying in the surrounding paragraph.
+  const mid = locate(big, words, 7, 1234 * 0.5 + 0.25)!;
+  assert.equal(mid.word, 1234 * 10 + 5);
+  assert.equal(mid.para, Math.floor((1234 * 10 + 5) / 20000));
 });
 
 test('paragraphStartWord finds the first word of a paragraph (or the end)', () => {

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import difflib
 import glob
 import hashlib
 import json
@@ -61,9 +62,21 @@ MIN_ANCHOR_RUN = 3        # aligned tokens must form a run this long before any 
 ANCHOR_GAP_SECONDS = 6.0  # emit two anchors from one clip when candidates span at least this
 CACHE_VERSION = 2         # transcript cache entries before this had no word timestamps
 
+# Dense mode: transcribe the whole file in contiguous chunks and anchor every paragraph.
+DENSE_CHUNK_SECONDS = 120.0    # target chunk length; consecutive chunks start this far apart
+DENSE_OVERLAP_SECONDS = 3.0    # a word cut at a chunk edge is heard whole in the next chunk
+DENSE_ANCHOR_GAP_SECONDS = 15.0  # inside a long paragraph, keep anchors no further apart than this
+DENSE_ALIGN_MARGIN = 200       # book words of context each side of the located offset
+# A 120 s chunk is ~300 words, where Whisper insertions/omissions drift the offset by a couple of
+# dozen words. A wider vote bin keeps that one passage together instead of splitting it across
+# neighbouring bins (which the runner-up test would then read as a second region).
+DENSE_BIN_WIDTH = 16
+
 # The `check` command samples held-out audio far enough from every anchor to be a fair test.
 CHECK_CLIP_SECONDS = 12.0
 CHECK_MIN_GAP_SECONDS = 15.0
+# A dense record's anchors per minute of audio; above this the check samples the chunk grid instead.
+CHECK_DENSE_ANCHORS_PER_MINUTE = 3.0
 
 USER_AGENT = "readalong/0.1 (+https://github.com/)"
 
@@ -232,6 +245,9 @@ class Matcher:
         self.min_margin = min_margin
         self.min_shingles = min_shingles
         self.word_para = word_para
+        # Bins within this many of the winner are the same passage (offset drift from indels), not a
+        # runner-up region. It grows with the bin width, so a short sampled clip keeps the old +-1.
+        self.runner_bins = max(1, int(bin_width) // BIN_WIDTH)
         self.index = shingle_index if shingle_index is not None else build_shingle_index(words, k)
 
     def locate(self, clip_words):
@@ -260,10 +276,11 @@ class Matcher:
         ranked = sorted(bins.items(), key=lambda kv: (-kv[1], kv[0]))
         win_bin, win_votes = ranked[0]
 
-        # Runner-up must be a *different* region (ignore neighbouring bins of the winner).
+        # Runner-up must be a *different* region (ignore bins near the winner, whose offsets are the
+        # same passage shifted by insertions/deletions).
         runner = 0
         for b, v in ranked[1:]:
-            if abs(b - win_bin) > 1:
+            if abs(b - win_bin) > self.runner_bins:
                 runner = v
                 break
 
@@ -384,6 +401,124 @@ def clip_anchors(book_words, clip_tokens, best_off, clip_start, clip_seconds,
         {"t": clip_start + clip_tokens[i]["start"], "word": j, "start": clip_tokens[i]["start"]}
         for (i, j) in select_anchor_tokens(clip_tokens, aligned, clip_seconds, min_run, gap_seconds)
     ]
+
+
+# --------------------------------------------------------------------------------------
+# Dense mode: whole-file chunks aligned to the book with a real sequence alignment
+# --------------------------------------------------------------------------------------
+
+def dense_chunk_plan(duration, chunk_seconds=DENSE_CHUNK_SECONDS, overlap=DENSE_OVERLAP_SECONDS):
+    """``[(start, length), ...]`` covering ``duration`` with ``overlap`` seconds of tail repeat.
+
+    Chunks start every ``chunk_seconds`` and each runs ``chunk_seconds + overlap`` except the last,
+    which is trimmed to the end of the file. The audio is never decoded as a whole: each chunk is
+    cut (and dropped) on its own, so memory is flat for an arbitrarily long file.
+    """
+    if not duration or duration <= 0 or chunk_seconds <= 0:
+        return []
+    span = chunk_seconds + max(0.0, overlap)
+    plan = []
+    start = 0.0
+    while start < duration:
+        plan.append((start, min(span, duration - start)))
+        start += chunk_seconds
+    return plan
+
+
+def dense_window_bounds(n_book, n_tokens, best_off, prev_word, margin=DENSE_ALIGN_MARGIN):
+    """Book window ``[lo, hi)`` to align one chunk into.
+
+    ``best_off`` is the located book position of the chunk's first word. ``prev_word`` (the highest
+    book word aligned so far, or None) is a prior: when it is known the window starts just before
+    it, so a repeated passage is read forward from where the chunk before ended rather than matching
+    an earlier copy. The end always reaches past the located offset plus the chunk plus margin
+    (Whisper omissions make the book span wider than the token count).
+    """
+    base = best_off if prev_word is None else prev_word
+    lo = max(0, int(base) - margin)
+    hi = int(best_off) + n_tokens + margin
+    if prev_word is not None:
+        hi = max(hi, int(prev_word) + n_tokens + 2 * margin)
+    hi = min(n_book, max(hi, lo + n_tokens + 2 * margin))
+    return lo, hi
+
+
+def align_tokens_to_book(book_words, clip_tokens, best_off, prev_word=None,
+                         margin=DENSE_ALIGN_MARGIN, min_run=MIN_ANCHOR_RUN):
+    """Align a dense chunk's tokens to the book window with ``difflib.SequenceMatcher``.
+
+    Unlike ``align_clip_tokens`` (a fixed +-4 word tolerance around one offset) this survives
+    hundreds of Whisper insertions/omissions: only tokens inside a matching block of at least
+    ``min_run`` are trusted, and blocks are found anywhere in the window. Returns
+    ``[(clip_index, book_index), ...]`` in increasing clip order.
+    """
+    a = [tok["token"] for tok in clip_tokens]
+    if not a:
+        return []
+    n_book = len(book_words)
+    lo, hi = dense_window_bounds(n_book, len(a), best_off, prev_word, margin)
+    if hi <= lo:
+        return []
+    sm = difflib.SequenceMatcher(a=a, b=book_words[lo:hi], autojunk=False)
+    aligned: list[tuple[int, int]] = []
+    for i, j, size in sm.get_matching_blocks():
+        if size < min_run:
+            continue  # too short to trust: a common word pair, not a run of speech
+        aligned.extend((i + k, lo + j + k) for k in range(size))
+    return aligned
+
+
+def _long_paragraph_anchors(group, max_gap=DENSE_ANCHOR_GAP_SECONDS):
+    """First token, last token, and enough tokens between that no gap exceeds ``max_gap``.
+
+    ``group`` is one paragraph's trusted tokens, sorted by word/time. Each step picks the *furthest*
+    token still within ``max_gap`` of the last anchor, so gaps are as close to ``max_gap`` as the
+    tokens allow. When the tokens themselves are further apart than ``max_gap`` the gap is simply
+    left as it is.
+    """
+    if not group:
+        return []
+    n = len(group)
+    chosen = [group[0]]
+    idx = 0
+    while idx < n - 1:
+        last_t = group[idx]["t"]
+        best = idx + 1
+        j = idx + 1
+        while j < n and group[j]["t"] - last_t <= max_gap:
+            best = j
+            j += 1
+        idx = best
+        chosen.append(group[idx])
+    return chosen
+
+
+def select_dense_anchors(tokens, word_para, max_gap=DENSE_ANCHOR_GAP_SECONDS):
+    """Pick dense anchors: every paragraph's first and last trusted token, plus fillers.
+
+    ``tokens`` is every deduplicated trusted token across the whole book, each a dict with ``word``
+    and ``t``, sorted by ``word``. Returns the selected subset in book order. A paragraph with no
+    trusted token at all contributes nothing.
+    """
+    if not tokens:
+        return []
+    out: list[dict] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        p = word_para[tokens[i]["word"]] if word_para else 0
+        j = i + 1
+        while j < n and (word_para[tokens[j]["word"]] if word_para else 0) == p:
+            j += 1
+        out.extend(_long_paragraph_anchors(tokens[i:j], max_gap))
+        i = j
+    return out
+
+
+def paragraph_start_words(word_para):
+    """Book word indices that are the first word of their paragraph."""
+    return [i for i in range(len(word_para)) if i == 0 or word_para[i] != word_para[i - 1]]
+
 
 
 class Book:
@@ -1311,9 +1446,86 @@ def _probe_source(fi, f, key, torrent, log, n_files, timings) -> dict:
     return {"url": url, "duration": duration}
 
 
+def _load_audio_source(args, fi, f, key, torrent, log, n_files, timings, info_hash,
+                       planned_entry, progress):
+    """Probe one audio file and, with ``--download``, fetch it; return where clips are cut from.
+
+    Returns ``{"src", "duration", "seek_map", "downloaded", "fresh_url"}`` or ``None`` when the
+    file has no usable duration or its download failed. ``fresh_url`` always resolves a new TorBox
+    link for the file, so a clip can retry once after a link expires.
+    """
+    fid = f.get("id")
+    if planned_entry is not None:
+        entry = planned_entry
+    else:
+        entry = _probe_source(fi, f, key, torrent, log, n_files, timings)
+    url = entry["url"]
+    duration = entry["duration"]
+
+    def fresh_url():
+        return torbox_requestdl(key, torrent.get("id"), fid)
+
+    if not duration or duration <= 0:
+        return {"src": None, "duration": duration, "seek_map": None,
+                "downloaded": None, "fresh_url": fresh_url}
+
+    src = url
+    seek_map = None
+    downloaded = None
+    if args.download:
+        dest = audio_cache_path(args.audio_dir, info_hash, f)
+        if audio_is_complete(dest, f.get("size")):
+            log(f"  using cached audio ({human_size(f.get('size'))})")
+        else:
+            log(f"  downloading {human_size(f.get('size'))} -> {dest}")
+            t0 = time.time()
+            try:
+                download_audio(url, dest, f.get("size"),
+                               on_progress=download_progress_callback(progress, fi))
+            except Exception as e:  # noqa: BLE001
+                log(f"  download failed ({redact(e, key)[:100]}); refreshing link")
+                try:
+                    download_audio(fresh_url(), dest, f.get("size"),
+                                   on_progress=download_progress_callback(progress, fi))
+                except Exception as e2:  # noqa: BLE001
+                    log(f"  download failed: {redact(e2, key)[:160]}")
+                    return {"src": None, "duration": duration, "seek_map": None,
+                            "downloaded": None, "fresh_url": fresh_url}
+            timings["download"] += time.time() - t0
+            downloaded = dest
+            log(f"  downloaded {human_size(os.path.getsize(dest))}")
+        src = dest
+        t0 = time.time()
+        local_duration = ffprobe_duration(dest)
+        timings["download"] += time.time() - t0
+        if local_duration and local_duration > 0:
+            duration = local_duration
+        # A Xing/VBR MP3 needs a true time<->byte map so the app can undo the player's
+        # TOC-based seek error. Never fail the build if this goes wrong.
+        try:
+            seek_map = seek_map_for_path(dest)
+            if seek_map:
+                log(f"  Xing seek map: {seek_map.get('intervals')} intervals, "
+                    f"{human_size(seek_map.get('dataSize'))} data")
+        except Exception as e:  # noqa: BLE001
+            log(f"  seek map failed ({redact(e, key)[:120]}); continuing without it")
+            seek_map = None
+    return {"src": src, "duration": duration, "seek_map": seek_map,
+            "downloaded": downloaded, "fresh_url": fresh_url}
+
+
+def _planned_units(args, duration):
+    """Clip/chunk count for one file, used for the --progress-json total before work starts."""
+    if args.mode == "dense":
+        return len(dense_chunk_plan(duration, args.dense_chunk, args.dense_overlap))
+    return len(_parse_time_range(duration, args.every, args.clip))
+
+
 def cmd_anchors(args) -> int:
-    if args.every <= 0 or args.clip <= 0:
+    if args.mode == "sampled" and (args.every <= 0 or args.clip <= 0):
         raise SystemExit("--every and --clip must be positive")
+    if args.mode == "dense" and (args.dense_chunk <= 0 or args.dense_overlap < 0):
+        raise SystemExit("--dense-chunk must be positive and --dense-overlap non-negative")
 
     # The app may point --out at a directory that does not exist yet; the cache file is
     # written next to it, so create the parent before any clip is processed.
@@ -1355,6 +1567,7 @@ def cmd_anchors(args) -> int:
         book = parse_epub(args.epub)
     log(f"  {book.title!r}: {len(book.paragraphs)} paragraphs, {len(book.words)} words")
     matcher = Matcher(book.words, min_conf=args.min_conf, min_margin=args.min_margin,
+                      bin_width=DENSE_BIN_WIDTH if args.mode == "dense" else BIN_WIDTH,
                       word_para=book.word_para)
 
     cache_file = cache_path_for(args.out)
@@ -1366,12 +1579,14 @@ def cmd_anchors(args) -> int:
     else:
         model, device_used, note = load_model(args.model, args.device, threads)
     log(f"Whisper: {args.model} on {device_used} - {note}")
+    if args.mode == "dense":
+        log(f"Dense mode: {args.dense_chunk:.0f}s chunks, {args.dense_overlap:.0f}s overlap")
 
     info_hash = str(torrent.get("hash") or args.hash)
     timings = {"download": 0.0, "transcribe": 0.0, "match": 0.0}
     total_clips = 0
 
-    # With --progress-json the app needs the total clip count before work starts, so probe
+    # With --progress-json the app needs the total clip/chunk count before work starts, so probe
     # every selected file's duration up front (remote ffprobe + a fresh link; no download).
     planned = None
     if args.progress_json:
@@ -1380,14 +1595,17 @@ def cmd_anchors(args) -> int:
             entry = _probe_source(fi, f, key, torrent, log, len(files), timings)
             planned.append(entry)
             if entry["duration"] and entry["duration"] > 0:
-                total_clips += len(_parse_time_range(entry["duration"], args.every, args.clip))
+                total_clips += _planned_units(args, entry["duration"])
         progress.emit("start", files=len(files), clips=total_clips)
 
     files_out = []
-    all_anchors = []          # dicts: file_i, t, word, para, conf, transcript
+    all_anchors = []          # dicts: file_i, t, word, para, conf (, transcript in sampled mode)
+    trusted: list[dict] = []  # dense mode: every trusted aligned token, in book order after sorting
+    seen_words: set = set()   # dense mode: book words already heard (chunk-overlap dedup)
+    prev_book = None          # dense mode: highest book word aligned so far, a prior for the next chunk
     clips_cut = 0
-    clips_used = 0            # clips that produced a transcript (fresh or cached)
-    clips_matched = 0         # clips whose transcript located in the book (>= 1 anchor candidate)
+    clips_used = 0            # clips/chunks that produced a transcript (fresh or cached)
+    clips_matched = 0         # clips/chunks whose transcript located in the book
     clips_done = 0
     consecutive_failures = 0  # reset on any transcript; fatal at FAIL_FAST_CLIPS
     downloaded: list[str] = []
@@ -1399,136 +1617,165 @@ def cmd_anchors(args) -> int:
             fid = f.get("id")
             name = f.get("name", "")
 
-            if planned is not None:
-                entry = planned[fi]
-            else:
-                entry = _probe_source(fi, f, key, torrent, log, len(files), timings)
-            url = entry["url"]
-            duration = entry["duration"]
-
-            def fresh_url():
-                nonlocal url
-                url = torbox_requestdl(key, torrent.get("id"), fid)
-                return url
-
-            if not duration or duration <= 0:
-                files_out.append({"id": fid, "name": name, "duration": duration, "anchors": []})
+            prep = _load_audio_source(
+                args, fi, f, key, torrent, log, len(files), timings, info_hash,
+                planned[fi] if planned is not None else None, progress)
+            if prep["src"] is None:
+                files_out.append({"id": fid, "name": name, "duration": prep["duration"],
+                                  "anchors": []})
                 continue
+            src = prep["src"]
+            duration = prep["duration"]
+            seek_map = prep["seek_map"]
+            fresh_url = prep["fresh_url"]
+            if prep["downloaded"]:
+                downloaded.append(prep["downloaded"])
 
-            src = url
-            seek_map = None
-            if args.download:
-                dest = audio_cache_path(args.audio_dir, info_hash, f)
-                if audio_is_complete(dest, f.get("size")):
-                    log(f"  using cached audio ({human_size(f.get('size'))})")
-                else:
-                    log(f"  downloading {human_size(f.get('size'))} -> {dest}")
-                    t0 = time.time()
-                    try:
-                        download_audio(url, dest, f.get("size"),
-                                       on_progress=download_progress_callback(progress, fi))
-                    except Exception as e:  # noqa: BLE001
-                        log(f"  download failed ({redact(e, key)[:100]}); refreshing link")
-                        try:
-                            url = fresh_url()
-                            download_audio(url, dest, f.get("size"),
-                                           on_progress=download_progress_callback(progress, fi))
-                        except Exception as e2:  # noqa: BLE001
-                            log(f"  download failed: {redact(e2, key)[:160]}")
-                            files_out.append({"id": fid, "name": name, "duration": duration,
-                                              "anchors": []})
-                            continue
-                    timings["download"] += time.time() - t0
-                    downloaded.append(dest)
-                    log(f"  downloaded {human_size(os.path.getsize(dest))}")
-                src = dest
-                t0 = time.time()
-                local_duration = ffprobe_duration(dest)
-                timings["download"] += time.time() - t0
-                if local_duration and local_duration > 0:
-                    duration = local_duration
-                # A Xing/VBR MP3 needs a true time<->byte map so the app can undo the player's
-                # TOC-based seek error. Never fail the build if this goes wrong.
-                try:
-                    seek_map = seek_map_for_path(dest)
-                    if seek_map:
-                        log(f"  Xing seek map: {seek_map.get('intervals')} intervals, "
-                            f"{human_size(seek_map.get('dataSize'))} data")
-                except Exception as e:  # noqa: BLE001
-                    log(f"  seek map failed ({redact(e, key)[:120]}); continuing without it")
-                    seek_map = None
-
-            def cut_and_transcribe(source):
+            def cut_and_transcribe(source, start, seconds):
                 nonlocal clips_cut
                 wav = os.path.join(tmpdir, "clip.wav")
                 t0 = time.time()
-                ffmpeg_clip(source, t, args.clip, wav)
+                ffmpeg_clip(source, start, seconds, wav)
                 timings["download"] += time.time() - t0
                 clips_cut += 1
                 t0 = time.time()
                 text = transcribe(model, wav)
-                timings["transcribe"] += time.time() - t0
+                took = time.time() - t0
+                timings["transcribe"] += took
+                # --rest: idle after each piece so the GPU/CPU cools and the fans stay down.
+                if args.rest > 0:
+                    time.sleep(min(took * args.rest, 120.0))
                 return text
 
-            for t in _parse_time_range(duration, args.every, args.clip):
-                ckey = f"{fid}|{t:.3f}|{args.clip}"
-                transcript = cache_get(cache, ckey)   # cached transcripts count as done
-                if transcript is None:
-                    try:
-                        transcript = cut_and_transcribe(src)
-                        cache_put(cache, ckey, transcript)
-                        save_cache(cache_file, cache)
-                    except Exception as e:  # noqa: BLE001
-                        if args.download:
-                            # A local file cannot be repaired by a fresh remote link.
-                            log(f"    t={t:.0f}s: clip failed ({redact(e, key)[:120]})")
-                        else:
-                            # Links expire; refresh once and retry the same clip.
-                            log(f"    t={t:.0f}s failed ({redact(e, key)[:80]}); refreshing link")
-                            try:
-                                src = fresh_url()
-                                transcript = cut_and_transcribe(src)
-                                cache_put(cache, ckey, transcript)
-                                save_cache(cache_file, cache)
-                            except Exception as e2:  # noqa: BLE001
-                                log(f"    t={t:.0f}s: giving up ({redact(e2, key)[:120]})")
+            if args.mode == "dense":
+                for start, length in dense_chunk_plan(duration, args.dense_chunk, args.dense_overlap):
+                    ckey = (f"{fid}|dense|{start:.3f}|"
+                            f"{args.dense_chunk:.1f}|{args.dense_overlap:.1f}")
+                    transcript = cache_get(cache, ckey)   # cached transcripts count as done
+                    if transcript is None:
+                        try:
+                            transcript = cut_and_transcribe(src, start, length)
+                            cache_put(cache, ckey, transcript)
+                            save_cache(cache_file, cache)
+                        except Exception as e:  # noqa: BLE001
+                            if args.download:
+                                # A local file cannot be repaired by a fresh remote link.
+                                log(f"    t={start:.0f}s: chunk failed ({redact(e, key)[:120]})")
+                            else:
+                                # Links expire; refresh once and retry the same chunk.
+                                log(f"    t={start:.0f}s failed ({redact(e, key)[:80]}); refreshing link")
+                                try:
+                                    src = fresh_url()
+                                    transcript = cut_and_transcribe(src, start, length)
+                                    cache_put(cache, ckey, transcript)
+                                    save_cache(cache_file, cache)
+                                except Exception as e2:  # noqa: BLE001
+                                    log(f"    t={start:.0f}s: giving up ({redact(e2, key)[:120]})")
 
-                if transcript is None:
-                    consecutive_failures += 1
+                    if transcript is None:
+                        consecutive_failures += 1
+                        clips_done += 1
+                        progress.emit("clip", done=clips_done, total=total_clips,
+                                      t=round(start + length / 2.0, 2), file=fi, transcribed=False)
+                        if consecutive_failures >= FAIL_FAST_CLIPS:
+                            raise RuntimeError(
+                                f"{consecutive_failures} consecutive chunks failed to cut; aborting")
+                        continue
+
+                    consecutive_failures = 0
                     clips_done += 1
                     progress.emit("clip", done=clips_done, total=total_clips,
-                                  t=round(t + args.clip / 2.0, 2), file=fi, transcribed=False)
-                    if consecutive_failures >= FAIL_FAST_CLIPS:
-                        raise RuntimeError(
-                            f"{consecutive_failures} consecutive clips failed to cut; aborting")
-                    continue
+                                  t=round(start + length / 2.0, 2), file=fi, transcribed=True)
+                    clips_used += 1
+                    clip_tokens = word_tokens(transcript.get("words", ()))
+                    if not clip_tokens:
+                        continue
+                    t0 = time.time()
+                    hit = matcher.locate([tok["token"] for tok in clip_tokens])
+                    timings["match"] += time.time() - t0
+                    if not hit:
+                        continue
+                    clips_matched += 1
+                    for (i, j) in align_tokens_to_book(book.words, clip_tokens, hit["word"],
+                                                       prev_word=prev_book):
+                        if j in seen_words:
+                            continue  # heard in the previous chunk's overlap: keep the first
+                        seen_words.add(j)
+                        trusted.append({
+                            "file_i": fi,
+                            "t": round(start + clip_tokens[i]["start"], 2),
+                            "word": j,
+                            "para": book.para_of_word(j),
+                            "conf": hit["conf"],
+                        })
+                        if prev_book is None or j > prev_book:
+                            prev_book = j
+            else:
+                for t in _parse_time_range(duration, args.every, args.clip):
+                    ckey = f"{fid}|{t:.3f}|{args.clip}"
+                    transcript = cache_get(cache, ckey)   # cached transcripts count as done
+                    if transcript is None:
+                        try:
+                            transcript = cut_and_transcribe(src, t, args.clip)
+                            cache_put(cache, ckey, transcript)
+                            save_cache(cache_file, cache)
+                        except Exception as e:  # noqa: BLE001
+                            if args.download:
+                                # A local file cannot be repaired by a fresh remote link.
+                                log(f"    t={t:.0f}s: clip failed ({redact(e, key)[:120]})")
+                            else:
+                                # Links expire; refresh once and retry the same clip.
+                                log(f"    t={t:.0f}s failed ({redact(e, key)[:80]}); refreshing link")
+                                try:
+                                    src = fresh_url()
+                                    transcript = cut_and_transcribe(src, t, args.clip)
+                                    cache_put(cache, ckey, transcript)
+                                    save_cache(cache_file, cache)
+                                except Exception as e2:  # noqa: BLE001
+                                    log(f"    t={t:.0f}s: giving up ({redact(e2, key)[:120]})")
 
-                consecutive_failures = 0
-                clips_done += 1
-                progress.emit("clip", done=clips_done, total=total_clips,
-                              t=round(t + args.clip / 2.0, 2), file=fi, transcribed=True)
-                clips_used += 1
-                clip_tokens = word_tokens(transcript.get("words", ()))
-                t0 = time.time()
-                hit = matcher.locate([tok["token"] for tok in clip_tokens])
-                timings["match"] += time.time() - t0
-                if not hit:
-                    continue
-                clips_matched += 1
-                for anchor in clip_anchors(book.words, clip_tokens, hit["word"], t, args.clip):
-                    all_anchors.append({
-                        "file_i": fi,
-                        "t": round(anchor["t"], 2),
-                        "word": anchor["word"],
-                        "para": book.para_of_word(anchor["word"]),
-                        "conf": hit["conf"],
-                        "transcript": transcript.get("text", ""),
-                    })
+                    if transcript is None:
+                        consecutive_failures += 1
+                        clips_done += 1
+                        progress.emit("clip", done=clips_done, total=total_clips,
+                                      t=round(t + args.clip / 2.0, 2), file=fi, transcribed=False)
+                        if consecutive_failures >= FAIL_FAST_CLIPS:
+                            raise RuntimeError(
+                                f"{consecutive_failures} consecutive clips failed to cut; aborting")
+                        continue
+
+                    consecutive_failures = 0
+                    clips_done += 1
+                    progress.emit("clip", done=clips_done, total=total_clips,
+                                  t=round(t + args.clip / 2.0, 2), file=fi, transcribed=True)
+                    clips_used += 1
+                    clip_tokens = word_tokens(transcript.get("words", ()))
+                    t0 = time.time()
+                    hit = matcher.locate([tok["token"] for tok in clip_tokens])
+                    timings["match"] += time.time() - t0
+                    if not hit:
+                        continue
+                    clips_matched += 1
+                    for anchor in clip_anchors(book.words, clip_tokens, hit["word"], t, args.clip):
+                        all_anchors.append({
+                            "file_i": fi,
+                            "t": round(anchor["t"], 2),
+                            "word": anchor["word"],
+                            "para": book.para_of_word(anchor["word"]),
+                            "conf": hit["conf"],
+                            "transcript": transcript.get("text", ""),
+                        })
 
             file_entry = {"id": fid, "name": name, "duration": duration, "anchors": []}
             if seek_map:
                 file_entry["seek"] = seek_map
             files_out.append(file_entry)
+
+        # Dense mode builds one anchor set for the whole book from every trusted token; sampled
+        # mode already did it clip by clip.
+        if args.mode == "dense":
+            trusted.sort(key=lambda a: a["word"])
+            all_anchors = select_dense_anchors(trusted, book.word_para)
 
         # ----- order enforcement across the whole book -----
         all_anchors.sort(key=lambda a: (a["file_i"], a["t"]))
@@ -1726,6 +1973,79 @@ def pick_sample_times(duration, anchors, count, rng,
     return out
 
 
+def anchors_per_minute(anchor_count, duration):
+    """Anchors per minute of audio (0.0 when the duration is unknown)."""
+    if not duration or duration <= 0 or anchor_count <= 0:
+        return 0.0
+    return anchor_count / (duration / 60.0)
+
+
+def is_dense_anchors(anchor_count, duration, threshold=CHECK_DENSE_ANCHORS_PER_MINUTE):
+    """Heuristic: a dense record has roughly two anchors per paragraph, far denser than sampling."""
+    return anchors_per_minute(anchor_count, duration) >= threshold
+
+
+def pick_dense_sample_times(duration, count, rng, clip_seconds=CHECK_CLIP_SECONDS,
+                            chunk_seconds=DENSE_CHUNK_SECONDS, grid_margin=5.0,
+                            max_attempts=None):
+    """Random clip starts that never line up with the dense build's chunk grid.
+
+    A dense build cuts chunks at ``k * chunk_seconds``; a held-out clip that starts within
+    ``grid_margin`` of such a boundary could meet a paragraph the chunker happened to split there,
+    so those offsets are rejected. Returns times in ``[0, duration - clip_seconds]``.
+    """
+    hi = duration - clip_seconds
+    if hi <= 0:
+        return []
+    out: list[float] = []
+    attempts = 0
+    limit = max_attempts if max_attempts is not None else max(50, count * 50)
+    while len(out) < count and attempts < limit:
+        attempts += 1
+        t = rng.uniform(0.0, hi)
+        phase = t % chunk_seconds
+        if phase < grid_margin or (chunk_seconds - phase) < grid_margin:
+            continue
+        out.append(t)
+    return out
+
+
+def paragraph_boundary_errors(aligned, clip_tokens, clip_start, file_anchors, duration,
+                              starts_set):
+    """Predicted minus measured start time for each paragraph start aligned inside one clip.
+
+    ``aligned`` is ``[(clip_index, book_index), ...]`` for the clip. A paragraph start counts only
+    when its first word itself aligned, so the measured time is the narrator's actual word start.
+    """
+    measured_by_word = {j: clip_start + clip_tokens[i]["start"] for (i, j) in aligned}
+    errors = []
+    for word in sorted(w for w in measured_by_word if w in starts_set):
+        measured = measured_by_word[word]
+        predicted = predict_time_for_word(file_anchors, word, duration)
+        if predicted is None:
+            continue
+        errors.append({"word": word, "true": measured, "error": predicted - measured})
+    return errors
+
+
+def paragraph_coverage(anchor_words, starts, nearby_words=3):
+    """How many paragraph starts have an anchor exactly on them, only nearby, or none.
+
+    ``anchor_words`` is the set of every anchor's book word across the record; ``starts`` is the
+    paragraph-start word indices. "nearby" means no anchor on the start word but one within
+    ``nearby_words`` of it.
+    """
+    exact = nearby = none = 0
+    for s in starts:
+        if s in anchor_words:
+            exact += 1
+        elif any((s + d) in anchor_words for d in range(-nearby_words, nearby_words + 1) if d):
+            nearby += 1
+        else:
+            none += 1
+    return {"exact": exact, "nearby": nearby, "none": none, "total": len(starts)}
+
+
 def _error_stats(errors):
     """Summary of signed errors (``predicted - true``): mean, median |.|, p90 |.|, max |.|."""
     vals = [e["error"] for e in errors]
@@ -1803,7 +2123,6 @@ def cmd_check(args) -> int:
     else:
         model, device_used, note = load_model(args.model, args.device, threads)
     log(f"Whisper: {args.model} on {device_used} - {note}")
-    log(f"Checking up to {args.samples} held-out samples (seed {args.seed})")
 
     timings = {"download": 0.0, "transcribe": 0.0, "match": 0.0}
     rng = random.Random(args.seed)
@@ -1815,7 +2134,19 @@ def cmd_check(args) -> int:
         planned.append(entry)
     total_duration = sum((e["duration"] or 0.0) for e in planned)
 
+    # A dense record's sampled-anchor gap test would find nothing; detect it and instead sample the
+    # audio at random offsets that avoid the build's chunk grid, then measure paragraph starts.
+    total_anchors = sum(len(v) for v in anchors_by_file.values())
+    density = anchors_per_minute(total_anchors, total_duration)
+    dense = args.mode == "dense" or (
+        args.mode == "auto" and is_dense_anchors(total_anchors, total_duration))
+    starts_set = set(paragraph_start_words(book.word_para)) if dense else set()
+    log(f"Record            : {'dense' if dense else 'sampled'} timing "
+        f"({density:.1f} anchors/min)")
+    log(f"Checking up to {args.samples} held-out samples (seed {args.seed})")
+
     attempted = 0
+    boundaries = 0
     errors: list[dict] = []
     tmpdir_obj = tempfile.TemporaryDirectory(prefix="readalong-check-")
     tmpdir = tmpdir_obj.name
@@ -1830,7 +2161,10 @@ def cmd_check(args) -> int:
             file_anchors = anchors_by_file.get(fid, [])
             share = (duration / total_duration) if total_duration else 0.0
             budget = int(round(args.samples * share))
-            times = pick_sample_times(duration, file_anchors, budget, rng, clip_seconds=args.clip)
+            if dense:
+                times = pick_dense_sample_times(duration, budget, rng, clip_seconds=args.clip)
+            else:
+                times = pick_sample_times(duration, file_anchors, budget, rng, clip_seconds=args.clip)
             if not times:
                 continue
             log(f"\n[{fi + 1}/{len(files)}] {name} (id {fid}) - {len(times)} samples")
@@ -1869,6 +2203,16 @@ def cmd_check(args) -> int:
                 timings["match"] += time.time() - t0
                 if not hit or not clip_tokens:
                     continue
+                if dense:
+                    aligned = align_tokens_to_book(book.words, clip_tokens, hit["word"])
+                    for err in paragraph_boundary_errors(
+                            aligned, clip_tokens, t, file_anchors, duration, starts_set):
+                        boundaries += 1
+                        errors.append({
+                            "file_i": fi, "name": name, "t": t,
+                            "word": err["word"], "true": err["true"], "error": err["error"],
+                        })
+                    continue
                 aligned = align_clip_tokens(book.words, clip_tokens, hit["word"])
                 pick = midpoint_aligned_token(clip_tokens, aligned, args.clip)
                 if pick is None:
@@ -1894,7 +2238,12 @@ def cmd_check(args) -> int:
     print("READALONG CHECK", file=out)
     print("=" * 78, file=out)
     print(f"Anchors           : {args.anchors}", file=out)
-    print(f"Samples aligned   : {len(errors)} / {attempted} attempted", file=out)
+    if dense:
+        print(f"Timing            : dense (boundary start-time errors, positive = late)", file=out)
+        print(f"Boundaries hit    : {boundaries} in {attempted} clips", file=out)
+    else:
+        print(f"Timing            : sampled (midpoint word errors, positive = late)", file=out)
+        print(f"Samples aligned   : {len(errors)} / {attempted} attempted", file=out)
     if stats:
         print(f"Mean error        : {stats['mean']:+.2f} s (positive = highlight would be late)", file=out)
         print(f"Median |error|    : {stats['median_abs']:.2f} s", file=out)
@@ -1906,6 +2255,10 @@ def cmd_check(args) -> int:
             print(f"  {e['name'][:44]:<44}  t={e['t']:>8.1f}s  {e['error']:+.2f}s", file=out)
     else:
         print("No samples aligned; increase --samples or check the anchors/book.", file=out)
+    cov = paragraph_coverage({a["word"] for v in anchors_by_file.values() for a in v},
+                             sorted(starts_set) if dense else paragraph_start_words(book.word_para))
+    print(f"Paragraph starts  : {cov['exact']} on first word, {cov['nearby']} only nearby, "
+          f"{cov['none']} none (of {cov['total']})", file=out)
     tot = timings["download"] + timings["transcribe"] + timings["match"]
     print(f"Time spent        : download {timings['download']:.1f}s | "
           f"transcribe {timings['transcribe']:.1f}s | match {timings['match']:.1f}s "
@@ -2017,8 +2370,19 @@ def build_parser():
     src.add_argument("--paragraphs", default=None, metavar="FILE",
                      help='JSON {"title": ..., "paragraphs": ["...", ...]} instead of an EPUB')
     pa.add_argument("--out", required=True, help="anchors.json output path")
-    pa.add_argument("--every", type=float, default=60.0, help="seconds between clip starts (default: 60)")
-    pa.add_argument("--clip", type=float, default=20.0, help="clip length in seconds (default: 20)")
+    pa.add_argument("--mode", choices=["dense", "sampled"], default="dense",
+                    help="dense (default) transcribes the whole file in contiguous chunks and "
+                         "anchors every paragraph; sampled cuts a clip every --every seconds")
+    pa.add_argument("--every", type=float, default=60.0,
+                    help="sampled mode: seconds between clip starts (default: 60)")
+    pa.add_argument("--clip", type=float, default=20.0,
+                    help="sampled mode: clip length in seconds (default: 20)")
+    pa.add_argument("--dense-chunk", type=float, default=DENSE_CHUNK_SECONDS, help=argparse.SUPPRESS)
+    pa.add_argument("--dense-overlap", type=float, default=DENSE_OVERLAP_SECONDS,
+                    help=argparse.SUPPRESS)
+    pa.add_argument("--rest", type=float, default=0.0,
+                    help="idle this many times the transcription time after each piece, to keep "
+                         "the machine cool and quiet (default: 0; 2 makes a build about 3x longer)")
     pa.add_argument("--model", default="small.en", help="faster-whisper model (default: small.en)")
     pa.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     pa.add_argument("--threads", type=int, default=None,
@@ -2060,6 +2424,9 @@ def build_parser():
                       help='JSON {"title": ..., "paragraphs": ["...", ...]} instead of an EPUB')
     pc.add_argument("--anchors", required=True, metavar="FILE",
                     help="anchors.json to test (a version-2, word-timed file)")
+    pc.add_argument("--mode", choices=["auto", "dense", "sampled"], default="auto",
+                    help="auto (default) picks dense when the record's anchors are dense; dense "
+                         "measures paragraph start times, sampled measures midpoint words")
     pc.add_argument("--samples", type=int, default=40, help="held-out clips to sample (default: 40)")
     pc.add_argument("--seed", type=int, default=1, help="random seed for the sample times (default: 1)")
     pc.add_argument("--clip", type=float, default=CHECK_CLIP_SECONDS,

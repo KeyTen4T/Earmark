@@ -37,10 +37,10 @@ with `--search-url`.
 readalong.py list --hash <infohash> [--filter TEXT]
 readalong.py ebook-search --title T --author A [--search-url URL] [--limit N] [--timeout S]
 readalong.py anchors --hash <infohash> [--filter TEXT] [--file-ids IDS] (--epub PATH | --paragraphs FILE) \
-    --out anchors.json [--every 60] [--clip 20] [--model small.en] [--device auto] \
+    --out anchors.json [--mode dense|sampled] [--every 60] [--clip 20] [--model small.en] [--device auto] \
     [--limit-files N] [--download] [--audio-dir DIR] [--keep-audio] [--progress-json]
 readalong.py check --hash <infohash> [--filter TEXT] [--file-ids IDS] (--epub PATH | --paragraphs FILE) \
-    --anchors anchors.json [--samples 40] [--seed 1] [--clip 12] \
+    --anchors anchors.json [--mode auto|dense|sampled] [--samples 40] [--seed 1] [--clip 12] \
     [--model small.en] [--device auto] [--limit-files N]
 ```
 
@@ -103,6 +103,30 @@ aligned word within the clip** (`clip_start + word_start`), never the clip midpo
 are cached with their word times in `anchors.json.cache.json` next to `--out`, so a re-run does not
 re-transcribe; a cache entry written before word times existed is re-transcribed. `anchors.json`
 contains **no book text**.
+
+### dense mode (the default)
+
+`--mode dense` transcribes the **whole** file instead of sampling it. Each audio file is cut into
+contiguous ~120 s chunks with a ~3 s overlap (so a word on a chunk edge is heard whole in the next
+chunk), one chunk is decoded at a time, so memory stays flat for a 23 h single file. Every chunk's
+transcript is located with the same shingle vote as sampled mode, then **all** of its tokens are
+aligned to a book window around the located offset with `difflib.SequenceMatcher` (rather than the
+sampled mode's +-4 word tolerance). Only tokens inside a matching run of at least three survive; a
+chunk that cannot be located (music, intro, credits) emits nothing. Overlap duplicates are dropped.
+
+Anchors are then chosen from the trusted tokens: every paragraph's first and last trusted token
+(ideally the paragraph's own first word), plus fillers so no two anchors inside a long paragraph are
+more than ~15 s apart. That is roughly two anchors per paragraph, so the app never interpolates
+linearly across a paragraph boundary. The whole-book monotonic pass is unchanged. The chunks are
+cached in the same `anchors.json.cache.json`, keyed per chunk, so an interrupted dense build resumes
+where it stopped. `--every` and `--clip` apply to sampled mode only.
+
+The `check` command detects a dense record (anchors per minute of audio above
+`CHECK_DENSE_ANCHORS_PER_MINUTE`, 3) and then samples seeded clips at random offsets that avoid the
+120 s chunk grid. For every paragraph boundary inside a clip whose first word aligned it reports the
+`predicted - measured` start time (mean, median |.|, p90 |.|, max |.|), plus how many of the book's
+paragraphs have an anchor exactly on their first word, only nearby, or none. `--mode dense|sampled`
+forces the choice, and `--model` may differ from the build's.
 
 ### anchors.json format
 
@@ -168,13 +192,16 @@ anchor time is `clip_start + that token's start`. Finally a longest-increasing-s
 enforces that **both** time and word index increase across the whole book (including the two
 anchors a clip can emit) and drops outliers.
 
-`check` measures the result on held-out audio: it samples random clip times spread over the
-selected files (each at least 15 s from every anchor), cuts 12 s clips, aligns each transcript the
-same way, takes the aligned token nearest the clip middle, and compares its true time with the
-time the anchors predict for that word (piecewise-linear in word index between anchors,
+`check` measures the result on held-out audio. For a sampled record it samples random clip times
+spread over the selected files (each at least 15 s from every anchor), cuts 12 s clips, aligns each
+transcript the same way, takes the aligned token nearest the clip middle, and compares its true time
+with the time the anchors predict for that word (piecewise-linear in word index between anchors,
 median-pace extrapolation outside — the same maths as `timeForWord` in `src/readalong/anchors.ts`).
-It prints samples aligned / attempted, signed mean error (positive = the highlight would be late),
-median / p90 / max absolute error in seconds, and the five worst samples.
+For a dense record (or with `--mode dense`) it samples random offsets that avoid the 120 s chunk
+grid and compares the predicted and measured **start time of each paragraph boundary** whose first
+word aligned inside the clip. Both print signed mean error (positive = the highlight would be late),
+median / p90 / max absolute error in seconds, and the five worst samples; the dense report also
+prints how many paragraph starts have an anchor exactly on the first word, only nearby, or none.
 
 ## Tests
 

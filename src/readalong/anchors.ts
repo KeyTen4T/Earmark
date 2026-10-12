@@ -170,6 +170,22 @@ function medianPace(anchors: ReadalongAnchor[]): number {
 }
 
 /**
+ * First index in `anchors` whose field (time `0` or word `2`) is `>= value`. Anchors are stored
+ * sorted by time, and word index rises with time, so a binary search replaces a linear scan now
+ * that a dense record holds thousands of anchors per file.
+ */
+function lowerBound(anchors: ReadalongAnchor[], value: number, field: 0 | 2): number {
+  let lo = 0;
+  let hi = anchors.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (anchors[mid][field] < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
  * Locate the paragraph playing at `seconds` for `fileId`. Linearly interpolates the global word
  * index between the surrounding anchors, and outside the first/last anchor extrapolates at the
  * file's median pace (clamped to the neighbouring anchor and to the book). Maps word -> paragraph
@@ -186,7 +202,7 @@ export function locate(
   if (!file || !file.anchors.length) return null;
   if (!wordToPara.length) return null;
 
-  const anchors = file.anchors.slice().sort((a, b) => a[0] - b[0]);
+  const anchors = file.anchors; // sorted by time (see fromAnchorsJson / withTimingCorrection)
   const first = anchors[0];
   const last = anchors[anchors.length - 1];
 
@@ -208,16 +224,25 @@ export function locate(
     return map(word);
   }
 
-  for (let i = 0; i < anchors.length - 1; i++) {
-    const a = anchors[i];
-    const b = anchors[i + 1];
-    if (seconds >= a[0] && seconds <= b[0]) {
-      const dt = b[0] - a[0];
-      const frac = dt > 0 ? (seconds - a[0]) / dt : 0;
-      return map(a[2] + (b[2] - a[2]) * frac);
-    }
+  const i = lowerBound(anchors, seconds, 0); // first anchor at or after `seconds`
+  const a = anchors[i - 1];
+  const b = anchors[i];
+  const dt = b[0] - a[0];
+  const frac = dt > 0 ? (seconds - a[0]) / dt : 0;
+  let word = Math.round(a[2] + (b[2] - a[2]) * frac);
+  if (word < 0) word = 0;
+  if (word >= wordToPara.length) word = wordToPara.length - 1;
+  const para = wordToPara[word];
+  // A dense record anchors paragraph boundaries. When `b` is the first word of its paragraph, hold
+  // the previous paragraph until that anchor's time: rounding the interpolated word would otherwise
+  // switch up to half a word early. When the first word was not heard (`b` is further in), the
+  // interpolated boundary is the best estimate, so it stands.
+  // Sparse records keep their existing behaviour (the switch can fall between anchors).
+  if (seconds < b[0] && b[2] > 0 && b[2] < wordToPara.length && wordToPara[b[2] - 1] !== wordToPara[b[2]] && isDenseRecord(rec)) {
+    const aw = Math.max(0, Math.min(a[2], wordToPara.length - 1));
+    if (wordToPara[aw] !== para) return { para: wordToPara[aw], word };
   }
-  return map(last[2]);
+  return { para, word };
 }
 
 /**
@@ -232,33 +257,49 @@ export function timeForWord(record: ReadalongRecord, fileId: number, word: numbe
   const file = rec.files.find((f) => f.id === fileId);
   if (!file || !file.anchors.length) return null;
 
-  const anchors = file.anchors.slice().sort((a, b) => a[0] - b[0]);
+  const anchors = file.anchors; // sorted by time, word index non-decreasing
   const first = anchors[0];
   const last = anchors[anchors.length - 1];
   const hi = file.duration > 0 ? file.duration : Number.POSITIVE_INFINITY;
   const clamp = (t: number) => Math.max(0, Math.min(hi, t));
-  const pace = medianPace(anchors);
 
   // Outside the anchors, undo locate()'s median-pace extrapolation.
   if (word <= first[2]) {
+    const pace = medianPace(anchors);
     if (pace <= 0) return clamp(first[0]);
     return clamp(first[0] - (first[2] - word) / pace);
   }
   if (word >= last[2]) {
+    const pace = medianPace(anchors);
     if (pace <= 0) return clamp(last[0]);
     return clamp(last[0] + (word - last[2]) / pace);
   }
 
-  for (let i = 0; i < anchors.length - 1; i++) {
-    const a = anchors[i];
-    const b = anchors[i + 1];
-    if (word >= a[2] && word <= b[2]) {
-      const dw = b[2] - a[2];
-      if (dw <= 0) return clamp(a[0]);
-      return clamp(a[0] + (b[0] - a[0]) * ((word - a[2]) / dw));
-    }
+  const i = lowerBound(anchors, word, 2); // first anchor whose word is at or after `word`
+  const a = anchors[i - 1];
+  const b = anchors[i];
+  const dw = b[2] - a[2];
+  if (dw <= 0) return clamp(a[0]);
+  return clamp(a[0] + (b[0] - a[0]) * ((word - a[2]) / dw));
+}
+
+/** Anchors per minute of audio above this is a dense record; sampled records sit near 1-2/min. */
+export const DENSE_ANCHORS_PER_MINUTE = 3;
+
+/**
+ * Whether a record came from a dense (whole-audio) build. Sampled records emit at most two anchors
+ * per 60 s clip, so they stay around 1-2 anchors a minute; a dense record anchors every paragraph
+ * (roughly two per paragraph) and is far denser. Pure; a record with unknown duration is not dense.
+ */
+export function isDenseRecord(record: ReadalongRecord): boolean {
+  let anchors = 0;
+  let duration = 0;
+  for (const f of record.files) {
+    anchors += f.anchors.length;
+    if (typeof f.duration === 'number' && Number.isFinite(f.duration) && f.duration > 0) duration += f.duration;
   }
-  return clamp(last[0]);
+  if (anchors === 0 || duration <= 0) return false;
+  return anchors / (duration / 60) >= DENSE_ANCHORS_PER_MINUTE;
 }
 
 /**

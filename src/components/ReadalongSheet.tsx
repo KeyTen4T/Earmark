@@ -16,7 +16,7 @@ import { readalongBridge, type ReadalongStatus } from '../readalong/desktop';
 import { chapterTitle, type TBTorrent, type TBFile } from '../torbox';
 import type { BookMeta } from '../storage';
 import { loadReadalong, deleteReadalong, loadPendingJobs, savePendingJobs, saveReadalong, loadEbookSearchUrl } from '../storage';
-import type { ReadalongRecord } from '../readalong/anchors';
+import { isDenseRecord, type ReadalongRecord } from '../readalong/anchors';
 import type { EbookCandidate } from '../readalong/ebookSearch';
 import { findEpubCandidates, searchEpubCandidates, searchTerms, runReadalong, cancelBuild, submitServerBuild } from '../readalong/create';
 import { defaultScope } from '../readalong/scope';
@@ -38,7 +38,7 @@ const mb = (n: number) => Math.round(n / MB);
 const downloadLabel = (bytes: number, total: number) =>
   total > 0 ? `Downloading audio… ${mb(bytes)} / ${mb(total)} MB` : `Downloading audio… ${mb(bytes)} MB`;
 
-const SERVER_HINT = 'Building on the server, about 20 minutes. You can close this.';
+const SERVER_HINT = 'Building on the server. It now transcribes the whole book, so a long one can take hours; you can close this.';
 
 export function ReadalongSheet({ visible, onClose, book, meta, chapters, index }: {
   visible: boolean;
@@ -342,6 +342,15 @@ export function ReadalongSheet({ visible, onClose, book, meta, chapters, index }
               <Text numberOfLines={1} style={T.title}>{record.epub.title || 'EPUB'}</Text>
               <Text style={T.small}>
                 {anchorCount(record)} anchor{anchorCount(record) === 1 ? '' : 's'} · created {new Date(record.created).toLocaleDateString()}
+              </Text>
+            </View>
+          ) : null}
+
+          {record && !isDenseRecord(record) ? (
+            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', padding: 10, borderRadius: R.md, backgroundColor: 'rgba(255,181,71,0.12)', borderWidth: 1, borderColor: 'rgba(255,181,71,0.35)' }}>
+              <Ionicons name="information-circle-outline" size={16} color={C.accent} />
+              <Text style={{ color: C.text, flex: 1, fontSize: 12 }}>
+                This read-along was made with the older timing. Rebuild it for exact highlights.
               </Text>
             </View>
           ) : null}

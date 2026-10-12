@@ -546,6 +546,32 @@ class ServerTestCase(unittest.TestCase):
             sv.Config.from_env({"API_TOKEN": "short"})
 
 
+class RecordConversionTestCase(unittest.TestCase):
+    """Direct tests of record_from_anchors, including a large dense anchors.json."""
+
+    def test_dense_anchors_are_all_kept_and_timing_stays_two(self):
+        # A dense build has thousands of anchors per file; none may be capped or reordered.
+        anchors = [{"t": round(i * 0.19, 2), "para": i // 3, "word": i * 4, "conf": 0.9}
+                   for i in range(3000)]
+        anchors_json = {
+            "version": 2,
+            "timing": "word",
+            "hash": AUDIO_HASH,
+            "epub": {"title": "Dense Book", "paragraphs": 1000, "words": 12000,
+                     "source": "paragraphs", "paragraphsSha1": PARAGRAPHS_SHA1},
+            "files": [{"id": 7, "name": "dense.m4b", "duration": 600.0, "anchors": anchors}],
+        }
+        record = sv.record_from_anchors(anchors_json, EPUB_HASH, EPUB_FILE_ID, 123)
+        self.assertEqual(record["timing"], 2)
+        self.assertEqual(record["epub"]["title"], "Dense Book")
+        self.assertEqual(len(record["files"][0]["anchors"]), 3000)
+        # Triples, sorted by time, with no fields added that the app does not expect.
+        self.assertEqual(record["files"][0]["anchors"][0], [0.0, 0, 0])
+        self.assertEqual(record["files"][0]["anchors"][-1], [round(2999 * 0.19, 2), 999, 11996])
+        self.assertEqual(set(record["files"][0]["anchors"][0]), {0})
+        self.assertEqual(len(record["files"][0]["anchors"][0]), 3)
+
+
 class GistTestCase(unittest.TestCase):
     """Direct tests of the gist writer against the fake GitHub API."""
 

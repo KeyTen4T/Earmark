@@ -113,6 +113,19 @@ class TestMatcher(unittest.TestCase):
         matcher = readalong.Matcher(words)
         self.assertIsNone(matcher.locate(block))
 
+    def test_wide_bin_keeps_a_drifting_chunk_as_one_region(self):
+        # A 120 s chunk is ~300 words; a 50-word Whisper omission shifts the offset by 50, which the
+        # default 4-word bin reads as two regions (margin ~0) and rejects. The dense bin width keeps
+        # the passage together and ignores the neighbouring bin when looking for a runner-up.
+        book = [f"w{i}" for i in range(600)]
+        clip = book[100:250] + book[300:450]   # a 50-word run omitted from the transcript
+        self.assertIsNone(readalong.Matcher(book).locate(clip))
+        wide = readalong.Matcher(book, bin_width=readalong.DENSE_BIN_WIDTH)
+        self.assertEqual(wide.runner_bins, readalong.DENSE_BIN_WIDTH // readalong.BIN_WIDTH)
+        hit = wide.locate(clip)
+        self.assertIsNotNone(hit)
+        self.assertLessEqual(abs(hit["word"] - 100), readalong.DENSE_BIN_WIDTH)
+
 
 class TestOrdering(unittest.TestCase):
     def test_lis_drops_outlier(self):
@@ -436,7 +449,7 @@ class TestAnchorsCmd(unittest.TestCase):
             return "http://fake/audio"
 
         argv = ["anchors", "--hash", "h", "--paragraphs", paras_path, "--out", out_path,
-                "--every", "10", "--clip", "5"]
+                "--mode", "sampled", "--every", "10", "--clip", "5"]
         if progress:
             argv.append("--progress-json")
         if download:
@@ -806,6 +819,317 @@ class TestCheckCmd(unittest.TestCase):
             text = buf.getvalue()
             self.assertIn("READALONG CHECK", text)
             self.assertRegex(text, r"Samples aligned\s+: [1-5] / [1-5] attempted")
+            self.assertIn("Mean error", text)
+
+
+class TestDenseChunkPlan(unittest.TestCase):
+    """dense_chunk_plan covers the file with contiguous, overlapping chunks."""
+
+    def test_chunks_cover_and_overlap(self):
+        self.assertEqual(readalong.dense_chunk_plan(240.0, 120.0, 3.0),
+                         [(0.0, 123.0), (120.0, 120.0)])
+        self.assertEqual(readalong.dense_chunk_plan(360.0, 120.0, 3.0),
+                         [(0.0, 123.0), (120.0, 123.0), (240.0, 120.0)])
+        self.assertEqual(readalong.dense_chunk_plan(0.0, 120.0, 3.0), [])
+        self.assertEqual(readalong.dense_chunk_plan(50.0, 120.0, 3.0), [(0.0, 50.0)])
+
+    def test_edge_word_is_whole_in_the_next_chunk(self):
+        (s0, l0), (s1, _l1) = readalong.dense_chunk_plan(240.0, 120.0, 3.0)
+        self.assertEqual(s1 - s0, 120.0)
+        self.assertEqual(s0 + l0 - s1, 3.0)   # the overlap
+
+
+class TestDenseAlignment(unittest.TestCase):
+    """The dense chunk alignment survives long runs of Whisper errors."""
+
+    @staticmethod
+    def _book(n=1200):
+        return [f"w{i}" for i in range(n)]
+
+    @staticmethod
+    def _toks(words):
+        return readalong.word_tokens([
+            {"word": w, "start": i * 0.3, "end": i * 0.3 + 0.25}
+            for i, w in enumerate(words)
+        ])
+
+    def test_align_survives_insertions_and_omissions(self):
+        book = self._book(600)
+        rng = random.Random(3)
+        clip = inject_errors(list(book[200:400]), rng, rate=0.2)
+        aligned = readalong.align_tokens_to_book(book, self._toks(clip), 200)
+        self.assertGreaterEqual(len(aligned), 130, "most of a noisy chunk should align")
+        idx = [j for _, j in aligned]
+        self.assertEqual(idx, sorted(idx))
+        for i, j in aligned:
+            self.assertEqual(book[j], self._toks(clip)[i]["token"])  # only exact token matches
+
+    def test_align_ignores_short_runs(self):
+        book = self._book(100)
+        toks = self._toks(["w10", "zz", "w20"])   # three isolated words, no run of three
+        self.assertEqual(readalong.align_tokens_to_book(book, toks, 10), [])
+
+    def test_align_uses_the_forward_prior_for_a_repeated_passage(self):
+        book = self._book(1200)
+        block = [f"r{i}" for i in range(40)]
+        book[300:340] = block
+        book[900:940] = block
+        toks = self._toks(book[900:940])
+        forward = readalong.align_tokens_to_book(book, toks, best_off=300, prev_word=899)
+        self.assertTrue(forward)
+        self.assertTrue(all(880 <= j < 960 for _, j in forward))
+        # With no prior the window starts at the located (wrong) copy.
+        backward = readalong.align_tokens_to_book(book, toks, best_off=300, prev_word=None)
+        self.assertTrue(all(280 <= j < 360 for _, j in backward))
+
+    def test_align_window_covers_a_chunk_that_omits_lots(self):
+        # A whole run of book words is missing from the transcript; the window must reach past it.
+        book = self._book(500)
+        words = book[100:150] + book[180:220]   # 150..179 omitted
+        aligned = readalong.align_tokens_to_book(book, self._toks(words), best_off=100)
+        self.assertEqual([j for _, j in aligned], list(range(100, 150)) + list(range(180, 220)))
+
+
+class TestDenseSelection(unittest.TestCase):
+    """Dense anchor selection: first/last of each paragraph, plus <=15 s fillers inside one."""
+
+    def test_first_and_last_token_of_each_paragraph(self):
+        word_para = [0] * 10 + [1] * 10
+        toks = [{"word": w, "t": w * 3.0} for w in range(20)]
+        sel = readalong.select_dense_anchors(toks, word_para, max_gap=100.0)
+        self.assertEqual([a["word"] for a in sel], [0, 9, 10, 19])
+
+    def test_filler_anchors_keep_gaps_within_the_maximum(self):
+        word_para = [0] * 10
+        toks = [{"word": w, "t": w * 10.0} for w in range(10)]  # 0, 10, ... 90
+        sel = readalong.select_dense_anchors(toks, word_para, max_gap=15.0)
+        times = [a["t"] for a in sel]
+        self.assertEqual(times[0], 0.0)
+        self.assertEqual(times[-1], 90.0)
+        self.assertTrue(all(b - a <= 15.0 for a, b in zip(times, times[1:])), times)
+
+    def test_unavoidable_gap_when_tokens_are_far_apart(self):
+        word_para = [0] * 2
+        sel = readalong.select_dense_anchors([{"word": 0, "t": 0.0}, {"word": 1, "t": 100.0}],
+                                             word_para, max_gap=15.0)
+        self.assertEqual([a["t"] for a in sel], [0.0, 100.0])
+
+    def test_a_paragraph_with_no_tokens_contributes_nothing(self):
+        word_para = [0] * 5 + [1] * 5 + [2] * 5
+        toks = [{"word": w, "t": float(w)} for w in list(range(5)) + list(range(10, 15))]
+        sel = readalong.select_dense_anchors(toks, word_para, max_gap=100.0)
+        self.assertEqual([a["word"] for a in sel], [0, 4, 10, 14])
+
+    def test_paragraph_start_words(self):
+        self.assertEqual(readalong.paragraph_start_words([0, 0, 1, 1, 1, 2]), [0, 2, 5])
+        self.assertEqual(readalong.paragraph_start_words([]), [])
+
+
+class TestDenseAnchorsCmd(unittest.TestCase):
+    """cmd_anchors dense mode end to end with TorBox, ffmpeg and whisper mocked out."""
+
+    def _run(self, out_dir, *, duration=60.0, paragraphs, transcribe, chunks=None, progress=False):
+        paras_path = os.path.join(out_dir, "book.json")
+        with open(paras_path, "w", encoding="utf-8") as fh:
+            json.dump({"title": "T", "paragraphs": paragraphs}, fh)
+        out = os.path.join(out_dir, "anchors.json")
+        torrent = {"id": 1, "hash": "h", "files": [{"id": 2, "name": "ch.m4b", "size": 10}]}
+
+        def cutter(src, start, sec, wav, timeout=120):
+            with open(wav, "w") as fh:
+                fh.write("x")
+
+        argv = ["anchors", "--hash", "h", "--paragraphs", paras_path, "--out", out, "--mode", "dense"]
+        if progress:
+            argv.append("--progress-json")
+        patches = [
+            mock.patch.object(readalong, "load_api_key", lambda *a, **k: "K"),
+            mock.patch.object(readalong, "torbox_mylist", lambda k: [torrent]),
+            mock.patch.object(readalong, "torbox_requestdl", lambda k, t, f: "http://fake/audio"),
+            mock.patch.object(readalong, "ffprobe_duration", lambda s, timeout=60: duration),
+            mock.patch.object(readalong, "load_model", lambda m, device="auto": (object(), "cpu", "s")),
+            mock.patch.object(readalong, "ffmpeg_clip", cutter),
+            mock.patch.object(readalong, "transcribe", transcribe),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            if chunks is not None:
+                stack.enter_context(mock.patch.object(
+                    readalong, "dense_chunk_plan",
+                    lambda dur, chunk_seconds, overlap: chunks))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                rc = readalong.cmd_anchors(readalong.build_parser().parse_args(argv))
+        with open(out, encoding="utf-8") as fh:
+            return rc, json.load(fh), buf.getvalue()
+
+    @staticmethod
+    def _transcript(words, base_start=0.3, step=0.6):
+        return {
+            "text": " ".join(words),
+            "words": [{"word": w, "start": base_start + i * step, "end": base_start + i * step + 0.5}
+                      for i, w in enumerate(words)],
+        }
+
+    def test_dense_output_shape_and_paragraph_boundaries(self):
+        words = [f"w{i}" for i in range(16)]
+        paragraphs = [" ".join(words[:8]), " ".join(words[8:])]
+        with tempfile.TemporaryDirectory() as d:
+            rc, docs, _ = self._run(d, paragraphs=paragraphs,
+                                    transcribe=lambda m, w: self._transcript(words))
+        self.assertEqual(rc, 0)
+        self.assertEqual(docs["version"], 2)
+        self.assertEqual(docs["timing"], "word")
+        anchors = docs["files"][0]["anchors"]
+        self.assertEqual([a["word"] for a in anchors], [0, 7, 8, 15])
+        self.assertTrue(all(isinstance(a["t"], float) for a in anchors))
+        self.assertTrue(all(round(a["t"], 2) == a["t"] for a in anchors))
+        # The first word of each paragraph carries its own word start, not a clip midpoint.
+        self.assertAlmostEqual(anchors[0]["t"], 0.3)
+        self.assertAlmostEqual(anchors[2]["t"], 0.3 + 8 * 0.6)
+
+    def test_dense_dedups_tokens_heard_in_the_chunk_overlap(self):
+        words = [f"w{i}" for i in range(20)]
+        paragraphs = [" ".join(words[:10]), " ".join(words[10:])]
+        chunk0 = self._transcript(words[0:10])
+        chunk1 = self._transcript(words[6:16])
+        seq = [chunk0, chunk1]
+
+        def transcribe(m, w):
+            return seq.pop(0) if seq else chunk0
+
+        with tempfile.TemporaryDirectory() as d:
+            rc, docs, _ = self._run(d, paragraphs=paragraphs, transcribe=transcribe,
+                                    chunks=[(0.0, 12.0), (9.0, 12.0)])
+        self.assertEqual(rc, 0)
+        anchor_words = [a["word"] for a in docs["files"][0]["anchors"]]
+        self.assertEqual(len(anchor_words), len(set(anchor_words)), "no word anchored twice")
+        # The overlap words 6..9 come from the first chunk and are not repeated.
+        self.assertEqual(anchor_words, [0, 9, 10, 15])
+
+    def test_unlocatable_chunk_emits_nothing(self):
+        words = [f"w{i}" for i in range(16)]
+        paragraphs = [" ".join(words[:8]), " ".join(words[8:])]
+        foreign = ["z%d" % i for i in range(12)]
+        with tempfile.TemporaryDirectory() as d:
+            rc, docs, _ = self._run(d, paragraphs=paragraphs,
+                                    transcribe=lambda m, w: self._transcript(foreign))
+        self.assertEqual(rc, 0)
+        self.assertEqual(docs["files"][0]["anchors"], [])
+
+    def test_dense_progress_reports_chunks(self):
+        words = [f"w{i}" for i in range(16)]
+        paragraphs = [" ".join(words[:8]), " ".join(words[8:])]
+        with tempfile.TemporaryDirectory() as d:
+            rc, _docs, text = self._run(d, duration=300.0, paragraphs=paragraphs,
+                                        transcribe=lambda m, w: self._transcript(words),
+                                        progress=True)
+        events = [json.loads(line) for line in text.splitlines()]
+        start = next(e for e in events if e["event"] == "start")
+        # 300 s at 120 s a chunk -> chunks at 0, 120, 240
+        self.assertEqual(start["clips"], 3)
+        done = next(e for e in events if e["event"] == "done")
+        self.assertEqual(done["clips"], 3)
+
+
+class TestDenseCheckMath(unittest.TestCase):
+    """The dense `check` sampling and paragraph-coverage maths."""
+
+    def test_is_dense_anchors(self):
+        self.assertFalse(readalong.is_dense_anchors(2, 120.0))     # 2 anchors / 120 s = 1/min
+        self.assertTrue(readalong.is_dense_anchors(40, 300.0))    # 40 / 300 s = 8/min
+        self.assertFalse(readalong.is_dense_anchors(0, 0.0))
+
+    def test_pick_dense_sample_times_avoids_the_chunk_grid(self):
+        rng = random.Random(1)
+        times = readalong.pick_dense_sample_times(1000.0, 20, rng, clip_seconds=12.0,
+                                                  chunk_seconds=120.0, grid_margin=5.0)
+        self.assertEqual(len(times), 20)
+        for t in times:
+            phase = t % 120.0
+            self.assertGreaterEqual(phase, 5.0)
+            self.assertLessEqual(phase, 115.0)
+        # Deterministic for a given seed.
+        self.assertEqual(times, readalong.pick_dense_sample_times(
+            1000.0, 20, random.Random(1), clip_seconds=12.0, chunk_seconds=120.0, grid_margin=5.0))
+
+    def test_paragraph_coverage_counts_exact_nearby_none(self):
+        starts = [0, 5, 10]
+        cov = readalong.paragraph_coverage({0, 6}, starts, nearby_words=3)
+        self.assertEqual(cov, {"exact": 1, "nearby": 1, "none": 1, "total": 3})
+
+    def test_paragraph_boundary_errors_only_for_aligned_starts(self):
+        toks = [{"token": "a", "start": 1.0}, {"token": "b", "start": 2.0},
+                {"token": "c", "start": 3.0}]
+        aligned = [(0, 4), (1, 5), (2, 9)]   # word 5 is a paragraph start, 4 and 9 are not
+        anchors = [{"t": 0.0, "word": 0}, {"t": 100.0, "word": 10}]
+        errs = readalong.paragraph_boundary_errors(aligned, toks, 10.0, anchors, 100.0, {5})
+        self.assertEqual(len(errs), 1)
+        self.assertEqual(errs[0]["word"], 5)
+        self.assertAlmostEqual(errs[0]["true"], 12.0)   # clip_start 10 + token start 2
+        self.assertAlmostEqual(errs[0]["error"], 50.0 - 12.0)
+
+
+class TestDenseCheckCmd(unittest.TestCase):
+    """cmd_check auto-detects a dense record and reports paragraph boundary errors."""
+
+    def test_dense_check_reports_boundaries_and_coverage(self):
+        book_words = [f"w{i}" for i in range(2500)]
+        paragraphs = [" ".join(book_words[i:i + 50]) for i in range(0, 2500, 50)]
+        # Two anchors per paragraph -> 100 anchors over 200 s = 30/min, clearly dense.
+        anchors_list = []
+        for p in range(len(paragraphs)):
+            anchors_list.append({"t": p, "para": p, "word": p * 50, "conf": 0.9})
+            anchors_list.append({"t": p + 0.5, "para": p, "word": p * 50 + 49, "conf": 0.9})
+        anchors_doc = {
+            "version": 2, "timing": "word", "hash": "h",
+            "epub": {"title": "T", "paragraphs": len(paragraphs), "words": 2500,
+                     "source": "paragraphs", "paragraphsSha1": "x"},
+            "files": [{"id": 2, "name": "ch.m4b", "duration": 200.0, "anchors": anchors_list}],
+        }
+        slice_words = book_words[100:140]
+        transcript = {
+            "text": " ".join(slice_words),
+            "words": [{"word": w, "start": i * 0.3, "end": i * 0.3 + 0.25}
+                      for i, w in enumerate(slice_words)],
+        }
+        torrent = {"id": 1, "hash": "h", "files": [{"id": 2, "name": "ch.m4b", "size": 10}]}
+
+        with tempfile.TemporaryDirectory() as d:
+            paras_path = os.path.join(d, "book.json")
+            with open(paras_path, "w", encoding="utf-8") as fh:
+                json.dump({"title": "T", "paragraphs": paragraphs}, fh)
+            anchors_path = os.path.join(d, "anchors.json")
+            with open(anchors_path, "w", encoding="utf-8") as fh:
+                json.dump(anchors_doc, fh)
+
+            def cutter(src, start, sec, wav, timeout=120):
+                with open(wav, "w") as fh:
+                    fh.write("x")
+
+            patches = [
+                mock.patch.object(readalong, "load_api_key", lambda *a, **k: "K"),
+                mock.patch.object(readalong, "torbox_mylist", lambda k: [torrent]),
+                mock.patch.object(readalong, "torbox_requestdl", lambda k, t, f: "http://fake/audio"),
+                mock.patch.object(readalong, "ffprobe_duration", lambda s, timeout=60: 200.0),
+                mock.patch.object(readalong, "load_model", lambda m, device="auto": (object(), "cpu", "s")),
+                mock.patch.object(readalong, "ffmpeg_clip", cutter),
+                mock.patch.object(readalong, "transcribe", lambda m, w: transcript),
+            ]
+            argv = ["check", "--hash", "h", "--paragraphs", paras_path,
+                    "--anchors", anchors_path, "--samples", "5", "--clip", "12", "--seed", "1"]
+            buf = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                for pt in patches:
+                    stack.enter_context(pt)
+                with contextlib.redirect_stdout(buf):
+                    rc = readalong.cmd_check(readalong.build_parser().parse_args(argv))
+            self.assertEqual(rc, 0)
+            text = buf.getvalue()
+            self.assertIn("Timing            : dense", text)
+            self.assertIn("Paragraph starts", text)
+            self.assertRegex(text, r"Boundaries hit\s+: [1-9]\d* in [1-5] clips")
             self.assertIn("Mean error", text)
 
 
