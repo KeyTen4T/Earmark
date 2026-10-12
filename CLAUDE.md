@@ -14,8 +14,12 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.13** (12 Oct): Android TV, the in-app installer, and dense read-along
-  timing (see `tools/readalong/STATUS.md`). None of the three has been run on a device.
+- **Current release: 1.3.14** (12 Oct): on Android TV the read-along's fade-away reading screen is
+  off (`chromeActive` in `PlayerScreen.tsx`); a remote could not bring the controls back. Worked out
+  from the code, not seen on a TV.
+- **1.3.13** (12 Oct): Android TV, the in-app installer, and dense read-along timing (see
+  `tools/readalong/STATUS.md`). The read-along timing was confirmed by the user on the laptop from
+  source (Harry Potter rebuilt); the other two have not been run on a device.
   - Android TV: the phone APK also installs on a TV. `plugins/withAndroidTV.js` adds the leanback
     launcher entry, the banner (`assets/icon/tv-banner.svg`) and moves the phone's portrait lock from
     the manifest into `MainActivity`; `isTV` in `src/layout.ts` forces the wide layout, `Tap` and
