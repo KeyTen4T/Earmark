@@ -3,6 +3,7 @@
 // The same catalogue publishes best-seller charts, overall and per genre, which power Discover's browsing.
 import { decodeEntities } from './scrapers/template';
 import { isFullCast } from './scrapers/cast';
+import { fetchWithTimeout } from './fetch-timeout';
 
 export type CatalogBook = {
   id: string;
@@ -37,7 +38,7 @@ const fromSearch = (r: any): CatalogBook => ({
 });
 
 export async function searchCatalog(query: string, fetcher: typeof fetch = fetch): Promise<CatalogBook[]> {
-  const res = await fetcher(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=audiobook&entity=audiobook&limit=40`);
+  const res = await fetchWithTimeout(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=audiobook&entity=audiobook&limit=40`, {}, 20_000, fetcher);
   if (!res.ok) throw new Error(`Catalogue search failed (HTTP ${res.status})`);
   const json = await res.json();
   return (json.results ?? []).filter((r: any) => r.collectionId && r.collectionName).map(fromSearch);
@@ -45,7 +46,7 @@ export async function searchCatalog(query: string, fetcher: typeof fetch = fetch
 
 /** Full details for one book. Chart entries come without a description, so this fills it in. */
 export async function lookupCatalog(id: string): Promise<CatalogBook | null> {
-  const res = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(id)}`);
+  const res = await fetchWithTimeout(`https://itunes.apple.com/lookup?id=${encodeURIComponent(id)}`, {}, 20_000);
   if (!res.ok) return null;
   const r = (await res.json()).results?.[0];
   return r?.collectionId ? fromSearch(r) : null;
@@ -78,7 +79,7 @@ const chartCache = new Map<string, { at: number; books: CatalogBook[] }>();
 export async function topCharts(genreId = '', fetcher: typeof fetch = fetch): Promise<CatalogBook[]> {
   const hit = chartCache.get(genreId);
   if (hit && Date.now() - hit.at < CHART_TTL_MS) return hit.books;
-  const res = await fetcher(`https://itunes.apple.com/us/rss/topaudiobooks/limit=50/genre=${genreId || '50000024'}/json`);
+  const res = await fetchWithTimeout(`https://itunes.apple.com/us/rss/topaudiobooks/limit=50/genre=${genreId || '50000024'}/json`, {}, 20_000, fetcher);
   if (!res.ok) throw new Error(`Couldn’t load the charts (HTTP ${res.status})`);
   const entry = (await res.json())?.feed?.entry;
   const books = (Array.isArray(entry) ? entry : entry ? [entry] : []).filter((e: any) => e?.id?.attributes?.['im:id']).map((e: any): CatalogBook => {

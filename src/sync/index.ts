@@ -103,7 +103,7 @@ export async function syncNow(opts: { timeoutMs?: number } = {}): Promise<void> 
       if (result.changed) emitSyncApplied();
     }
   } catch (e: any) {
-    setStatus({ error: e?.name === 'AbortError' ? 'Sync timed out' : (e?.message ?? 'Sync failed') });
+    setStatus({ error: e?.name === 'AbortError' || e?.name === 'TimeoutError' ? 'Sync timed out' : (e?.message ?? 'Sync failed') });
   } finally {
     running = false;
     setStatus({ busy: false });

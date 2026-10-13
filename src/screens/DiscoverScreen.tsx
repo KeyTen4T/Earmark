@@ -149,7 +149,7 @@ function SourceSearch({ token, scrapers, bottomPad, active, onAdded, goSources, 
   const startPreview = (r: SearchResult) => {
     const magnet = r.magnet ?? magnetFor(r.infoHash, r.title);
     if (!magnet) return;
-    if (player.playing) player.toggle(); // the book stays paused; a preview never resumes it
+    if (player.isPlaying()) player.toggle(); // the book stays paused; a preview never resumes it
     void preview.start({ id: r.id, hash: r.infoHash, magnet, title: r.title, narrator: r.narrator });
   };
 

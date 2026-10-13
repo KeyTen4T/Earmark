@@ -69,6 +69,13 @@ import './car-mode.test.ts';
 import './android-tv-plugin.test.ts';
 // Cleaning a torrent name into a display title and reading its format badges are pure.
 import './titles.test.ts';
+// The virtualised Library grid: row building and the per-book card metrics are pure.
+import './library-rows.test.ts';
+// The write queue that serialises read-modify-write storage, the progress-freshness rule, and the
+// composed fetch timeout.
+import './write-queue.test.ts';
+import './remote-progress.test.ts';
+import './fetch-timeout.test.ts';
 
 test('sha1 matches node crypto across lengths', () => {
   for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 1000, 70000]) {

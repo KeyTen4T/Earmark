@@ -1,6 +1,7 @@
 // Personal "Surprise me" picks: sends the listener's history and a list of candidate books to an AI
 // service the user has a key for, and gets back which candidate to suggest and why.
 // The provider is recognised from the key itself, so Settings needs only one field.
+import { fetchWithTimeout } from './fetch-timeout';
 
 export type AiProvider = 'gemini' | 'groq' | 'xai';
 export type HistoryItem = { title: string; author?: string; status: 'finished' | 'listening' | 'not started' | 'wants to listen'; percent?: number };
@@ -33,7 +34,8 @@ type Fetcher = typeof fetch;
 
 async function getJson(fetcher: Fetcher, url: string, init: RequestInit, who: string) {
   let res: Response;
-  try { res = await fetcher(url, init); } catch { throw new Error(`Could not reach ${who}. Check your connection.`); }
+  // An AI reply can take a while to generate, so this limit is deliberately longer than a plain API.
+  try { res = await fetchWithTimeout(url, init, 60_000, fetcher); } catch { throw new Error(`Could not reach ${who}. Check your connection.`); }
   const json: any = await res.json().catch(() => null);
   if (!res.ok) {
     if (res.status === 401 || res.status === 403 || /API key not valid/i.test(json?.error?.message ?? '')) throw new Error(`${who} rejected that API key.`);

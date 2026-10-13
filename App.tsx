@@ -3,7 +3,7 @@ import { View, AppState, BackHandler, Animated, Easing, Platform, Text, ScrollVi
 import { useLayout, applyDesktopStyles, DESKTOP_GUTTER } from './src/layout';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { C, T, prettyName } from './src/theme';
+import { C, T } from './src/theme';
 import { PlayerProvider, usePlayer } from './src/player/PlayerContext';
 import { TabBar, MiniPlayer, Sidebar, PlayerBar, Tab, TAB_BAR_HEIGHT, type PlayerBarSheet } from './src/components/Chrome';
 import { ToastHost, toast, confirmAction, Sheet, Button } from './src/components/ui';
@@ -12,9 +12,10 @@ import { LibraryScreen } from './src/screens/LibraryScreen';
 import { DiscoverScreen } from './src/screens/DiscoverScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { PlayerScreen } from './src/screens/PlayerScreen';
-import { TBTorrent, listBooks, isReady, isStuck, chapterList } from './src/torbox';
+import { TBTorrent, listBooks, isReady, isStuck } from './src/torbox';
+import { bookMetrics, type BookMetrics } from './src/library-rows';
 import {
-  getApiKey, clearApiKey, loadProgress, loadMeta, saveUserScrapers, bookFraction, loadDisabled, saveDisabled, migrateRemoteBuiltins, loadSettings, takeCorruptKeys,
+  getApiKey, clearApiKey, loadProgress, loadMeta, saveUserScrapers, loadDisabled, saveDisabled, migrateRemoteBuiltins, loadSettings, takeCorruptKeys,
   loadUpdateCheckedAt, saveUpdateCheckedAt, loadDismissedUpdate, saveDismissedUpdate, loadLastVersion, saveLastVersion,
   loadFavNarrators, saveFavNarrators, loadReadElsewhere,
   Progress, BookMeta,
@@ -207,28 +208,42 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   }, [tab]);
 
   // TorBox's list can lag an add by a few seconds; without a second look the new book wouldn't appear.
-  const refreshAfterAdd = (hash?: string) => { awaited.current = awaitAdded(awaited.current, hash, Date.now()); refresh(true); };
+  const refreshAfterAdd = useCallback((hash?: string) => { awaited.current = awaitAdded(awaited.current, hash, Date.now()); refresh(true); }, [refresh]);
+  // Stable identities for the screen callbacks: a memoised Library card is skipped when only unrelated
+  // Shell state changes.
+  const openPlayer = useCallback(() => { setPlayerSheet(undefined); setPlayerOpen(true); }, []);
+  const doRefresh = useCallback(() => { refresh(); }, [refresh]);
+  const goDiscover = useCallback(() => setTab('search'), []);
+  const goSources = useCallback(() => setTab('sources'), []);
+
+  // The per-book numbers, done once per change of the underlying data so history and the import
+  // match set share the same work rather than each mapping the books again.
+  const metrics = useMemo(() => {
+    const map = new Map<number, BookMetrics>();
+    for (const b of books) map.set(b.id, bookMetrics({ book: b, progress: progress[b.id], meta: meta[b.hash?.toLowerCase()] ?? {} }));
+    return map;
+  }, [books, meta, progress]);
 
   // What the listener has and how far they got, for personal recommendations.
   const history = useMemo<HistoryItem[]>(() => books.map((b) => {
-    const m = meta[b.hash?.toLowerCase()] ?? {};
-    const f = bookFraction(progress[b.id], chapterList(b).map((c) => c.size));
-    return { title: m.title ?? prettyName(b.name), author: m.author, status: f >= 1 ? 'finished' : f > 0 ? 'listening' : 'not started', percent: f * 100 };
-  }), [books, meta, progress]);
+    const f = metrics.get(b.id)!;
+    return { title: f.title, author: f.author, status: f.fraction >= 1 ? 'finished' : f.fraction > 0 ? 'listening' : 'not started', percent: f.fraction * 100 };
+  }), [books, metrics]);
 
   // The books an import can match against: the same finished books the shelf shows, with the date and
   // rating it would fill only where they are blank.
   const library = useMemo<LibraryBook[]>(() => books.filter(isReady).map((b) => {
     const m = meta[b.hash?.toLowerCase()] ?? {};
+    const f = metrics.get(b.id)!;
     return {
       hash: b.hash,
-      title: m.title ?? prettyName(b.name),
-      author: m.author,
-      finished: !!progress[b.id]?.finished,
+      title: f.title,
+      author: f.author,
+      finished: f.finished,
       rating: m.rating,
       finishedAt: bookFinishedAt(m, progress[b.id]),
     };
-  }), [books, meta, progress]);
+  }), [books, meta, progress, metrics]);
 
   const { wide } = useLayout();
   const [addRequest, setAddRequest] = useState(0); // bumped to ask the library to open its "add a book" sheet
@@ -260,10 +275,10 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
       <View style={{ flex: 1, paddingHorizontal: wide ? DESKTOP_GUTTER : 0 }}>
       <TabPane active={tab === 'library'}>
         <LibraryScreen token={token} books={books} progress={progress} meta={meta} readElsewhere={readElsewhere} refreshing={refreshing} loaded={loaded}
-          lastBookId={lastBookId} addRequest={addRequest} bottomPad={bottomPad} refresh={() => refresh()} onAdded={refreshAfterAdd} onOpen={() => { setPlayerSheet(undefined); setPlayerOpen(true); }} onMeta={setMeta} onProgress={setProgress} onReadElsewhere={setReadElsewhere} goDiscover={() => setTab('search')} />
+          lastBookId={lastBookId} addRequest={addRequest} bottomPad={bottomPad} refresh={doRefresh} onAdded={refreshAfterAdd} onOpen={openPlayer} onMeta={setMeta} onProgress={setProgress} onReadElsewhere={setReadElsewhere} goDiscover={goDiscover} />
       </TabPane>
       <TabPane active={tab === 'search'}>
-        <DiscoverScreen token={token} history={history} scrapers={enabledScrapers} bottomPad={bottomPad} active={tab === 'search'} onAdded={refreshAfterAdd} goSources={() => setTab('sources')}
+        <DiscoverScreen token={token} history={history} scrapers={enabledScrapers} bottomPad={bottomPad} active={tab === 'search'} onAdded={refreshAfterAdd} goSources={goSources}
           narrators={narrators} onNarrators={(l) => { setNarrators(l); saveFavNarrators(l); }} />
       </TabPane>
       <TabPane active={tab === 'sources'}>

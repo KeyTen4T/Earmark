@@ -165,7 +165,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
     if (sampling) return stopSample();
     if (!b.previewUrl) return;
     try {
-      if (player.playing) player.toggle(); // don't talk over the book that's playing
+      if (player.isPlaying()) player.toggle(); // don't talk over the book that's playing
       const p = createAudioPlayer({ uri: b.previewUrl });
       p.addListener('playbackStatusUpdate', (s: any) => { if (s?.didJustFinish) stopSample(); });
       p.play();

@@ -3,6 +3,7 @@
 // Docs: https://openlibrary.org/dev/docs/api/search · https://performance-partners.apple.com/search-api
 import type { TBTorrent } from './torbox';
 import { BookMeta, saveMetaMany } from './storage';
+import { fetchWithTimeout } from './fetch-timeout';
 import { prettyName } from './theme';
 import { getHcToken, searchBooks } from './hardcover';
 import { matchTitle } from './title-match';
@@ -22,7 +23,7 @@ export function coverQuery(name: string) {
 }
 
 async function getJSON(url: string) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Earmark audiobook app' } });
+  const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Earmark audiobook app' } }, 20_000);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

@@ -2,6 +2,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FS from 'expo-file-system';
 import { validateScraper, ScraperDef } from './engine';
 import { isProvider, providerToScraper } from './provider';
+import { fetchWithTimeout } from '../fetch-timeout';
 
 async function readText(uri: string): Promise<string> {
   const fs: any = FS;
@@ -40,7 +41,7 @@ export async function pickScraperFiles(): Promise<{ defs: ScraperDef[]; errors: 
 }
 
 export async function fetchScrapers(url: string) {
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url, {}, 20_000);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return parseScrapers(await res.text());
 }

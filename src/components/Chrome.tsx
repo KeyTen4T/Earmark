@@ -6,7 +6,7 @@ import { C, R, T, pct } from '../theme';
 import { Tap, Cover, Pop, FadeIn, Button, IconButton, IconName, SkipIcon } from './ui';
 import { Scrubber } from './Scrubber';
 import { SIDEBAR_WIDTH, isTV } from '../layout';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlayer, usePlayerTick } from '../player/PlayerContext';
 
 export type Tab = 'library' | 'search' | 'sources';
 /** A full-player sheet the desktop bar can ask to open straight away. */
@@ -58,8 +58,9 @@ export function TabBar({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void
 
 export function MiniPlayer({ onOpen }: { onOpen: () => void }) {
   const p = usePlayer();
+  const t = usePlayerTick();
   if (!p.book) return null;
-  const frac = p.duration > 0 ? p.position / p.duration : 0;
+  const frac = t.duration > 0 ? t.position / t.duration : 0;
   return (
     <FadeIn y={40}>
     <Tap onPress={onOpen} scaleTo={0.98} style={{
@@ -71,15 +72,15 @@ export function MiniPlayer({ onOpen }: { onOpen: () => void }) {
         <View style={{ flex: 1 }}>
           <Text numberOfLines={1} style={{ color: C.text, fontWeight: '700', fontSize: 14 }}>{p.displayTitle}</Text>
           <Text numberOfLines={1} style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>
-            {p.error ? p.error : p.recovering ? 'Reconnecting…' : p.loading ? 'Loading…' : p.chapterName}
+            {p.error ? p.error : t.recovering ? 'Reconnecting…' : t.loading ? 'Loading…' : p.chapterName}
           </Text>
         </View>
         <Tap onPress={() => p.skip(-p.skipBack)} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Skip back ${p.skipBack} seconds`} style={{ padding: 6 }}>
           <SkipIcon dir="back" seconds={p.skipBack} size={20} color={C.sub} />
         </Tap>
-        <Tap onPress={p.toggle} haptic hitSlop={8} scaleTo={0.85} accessibilityLabel={p.playing ? 'Pause' : 'Play'} style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: C.text, alignItems: 'center', justifyContent: 'center' }}>
-          <Pop on={p.playing} from={0.6}>
-            <Ionicons name={p.playing ? 'pause' : 'play'} size={20} color={C.bg} style={{ marginLeft: p.playing ? 0 : 2 }} />
+        <Tap onPress={p.toggle} haptic hitSlop={8} scaleTo={0.85} accessibilityLabel={t.playing ? 'Pause' : 'Play'} style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: C.text, alignItems: 'center', justifyContent: 'center' }}>
+          <Pop on={t.playing} from={0.6}>
+            <Ionicons name={t.playing ? 'pause' : 'play'} size={20} color={C.bg} style={{ marginLeft: t.playing ? 0 : 2 }} />
           </Pop>
         </Tap>
       </View>
@@ -106,7 +107,8 @@ export function Sidebar({ tab, onChange, onAdd }: { tab: Tab; onChange: (t: Tab)
   // on Library and Down on Add stay put. Right is left alone, to enter the content naturally.
   const refs = [useRef<View>(null), useRef<View>(null), useRef<View>(null), useRef<View>(null)];
   const [tags, setTags] = useState<(number | null)[]>([null, null, null, null]);
-  useEffect(() => { setTags(refs.map((r) => findNodeHandle(r.current))); }, []);
+  // TV only: react-native-web's findNodeHandle throws, which blanked the whole desktop window.
+  useEffect(() => { if (isTV) setTags(refs.map((r) => findNodeHandle(r.current))); }, []);
   // The three tabs are 0..2 and "Add a book" is 3.
   const links = (i: number): any => !isTV ? {} : ({
     nextFocusUp: tags[i === 0 ? 0 : i - 1] ?? undefined,
@@ -145,6 +147,7 @@ export function Sidebar({ tab, onChange, onAdd }: { tab: Tab; onChange: (t: Tab)
 /** Desktop now-playing bar across the bottom of the window. On a TV it is one slim row. */
 export function PlayerBar({ onOpen }: { onOpen: (sheet?: PlayerBarSheet) => void }) {
   const p = usePlayer();
+  const t = usePlayerTick();
   if (!p.book) return null;
   const small = isTV;
   const cover = small ? 44 : 58;
@@ -154,9 +157,9 @@ export function PlayerBar({ onOpen }: { onOpen: (sheet?: PlayerBarSheet) => void
       <Tap onPress={() => p.skip(-p.skipBack)} hitSlop={small ? 6 : 8} scaleTo={0.88} accessibilityLabel={`Skip back ${p.skipBack} seconds`} style={{ width: small ? 28 : 30, height: small ? 28 : 30, alignItems: 'center', justifyContent: 'center' }}>
         <SkipIcon dir="back" seconds={p.skipBack} size={small ? 22 : 24} color={C.sub} />
       </Tap>
-      <Tap onPress={p.toggle} scaleTo={0.88} accessibilityLabel={p.playing ? 'Pause' : 'Play'} style={{ width: small ? 36 : 40, height: small ? 36 : 40, borderRadius: small ? 18 : 20, backgroundColor: C.text, alignItems: 'center', justifyContent: 'center' }}>
-        <Pop on={p.playing} from={0.6}>
-          <Ionicons name={p.playing ? 'pause' : 'play'} size={small ? 17 : 19} color={C.bg} style={{ marginLeft: p.playing ? 0 : 2 }} />
+      <Tap onPress={p.toggle} scaleTo={0.88} accessibilityLabel={t.playing ? 'Pause' : 'Play'} style={{ width: small ? 36 : 40, height: small ? 36 : 40, borderRadius: small ? 18 : 20, backgroundColor: C.text, alignItems: 'center', justifyContent: 'center' }}>
+        <Pop on={t.playing} from={0.6}>
+          <Ionicons name={t.playing ? 'pause' : 'play'} size={small ? 17 : 19} color={C.bg} style={{ marginLeft: t.playing ? 0 : 2 }} />
         </Pop>
       </Tap>
       <Tap onPress={() => p.skip(p.skipForward)} hitSlop={small ? 6 : 8} scaleTo={0.88} accessibilityLabel={`Skip forward ${p.skipForward} seconds`} style={{ width: small ? 28 : 30, height: small ? 28 : 30, alignItems: 'center', justifyContent: 'center' }}>
@@ -172,7 +175,7 @@ export function PlayerBar({ onOpen }: { onOpen: (sheet?: PlayerBarSheet) => void
           <Cover title={p.book.name} uri={p.meta.cover} size={cover} radius={small ? 8 : 10} />
           <View style={{ flex: 1 }}>
             <Text numberOfLines={1} style={{ color: C.text, fontWeight: '700', fontSize: small ? 13 : 14 }}>{p.displayTitle}</Text>
-            <Text numberOfLines={1} style={{ color: C.sub, fontSize: small ? 11 : 12, marginTop: small ? 2 : 3 }}>{p.error ? p.error : p.recovering ? 'Reconnecting…' : p.loading ? 'Loading…' : p.chapterName}</Text>
+            <Text numberOfLines={1} style={{ color: C.sub, fontSize: small ? 11 : 12, marginTop: small ? 2 : 3 }}>{p.error ? p.error : t.recovering ? 'Reconnecting…' : t.loading ? 'Loading…' : p.chapterName}</Text>
           </View>
         </Tap>
         {small ? (
@@ -181,13 +184,13 @@ export function PlayerBar({ onOpen }: { onOpen: (sheet?: PlayerBarSheet) => void
           <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>{transport}</View>
             <View style={{ flex: 1, minWidth: 120 }}>
-              <Scrubber position={p.position} duration={p.duration} onSeek={p.seek} step={p.seekStep} />
+              <Scrubber position={t.position} duration={t.duration} onSeek={p.seek} step={p.seekStep} />
             </View>
           </View>
         ) : (
           <View style={{ flex: 1, maxWidth: 720, alignSelf: 'center' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14, marginBottom: -4 }}>{transport}</View>
-            <Scrubber position={p.position} duration={p.duration} onSeek={p.seek} step={p.seekStep} />
+            <Scrubber position={t.position} duration={t.duration} onSeek={p.seek} step={p.seekStep} />
           </View>
         )}
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }}>

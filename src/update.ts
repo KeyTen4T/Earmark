@@ -6,6 +6,7 @@ import { Directory, File, FileMode, Paths } from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
 import app from '../app.json';
 import { parseRelease, updateAvailable, type Release } from './update-check';
+import { fetchWithTimeout } from './fetch-timeout';
 import { createInstallController, installedApkNames, type InstallDownload, type InstallState } from './update-install';
 import { toast } from './components/ui';
 
@@ -15,19 +16,13 @@ const API = 'https://api.github.com/repos/KeyTen4T/Earmark/releases/latest';
 export const currentVersion = (): string => app.expo.version;
 
 export async function checkForUpdate(): Promise<{ release: Release; newer: boolean }> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 15000);
-  try {
-    const res = await fetch(API, { headers: { Accept: 'application/vnd.github+json' }, signal: ctl.signal })
-      .catch(() => { throw new Error('Couldn’t reach GitHub to check for updates.'); });
-    if (!res.ok) throw new Error(`GitHub returned ${res.status} while checking for updates.`);
-    const json = await res.json().catch(() => { throw new Error('GitHub sent an unreadable update response.'); });
-    const release = parseRelease(json);
-    if (!release) throw new Error('The latest GitHub release is not a usable version.');
-    return { release, newer: updateAvailable(currentVersion(), release) };
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await fetchWithTimeout(API, { headers: { Accept: 'application/vnd.github+json' } }, 15_000)
+    .catch(() => { throw new Error('Couldn’t reach GitHub to check for updates.'); });
+  if (!res.ok) throw new Error(`GitHub returned ${res.status} while checking for updates.`);
+  const json = await res.json().catch(() => { throw new Error('GitHub sent an unreadable update response.'); });
+  const release = parseRelease(json);
+  if (!release) throw new Error('The latest GitHub release is not a usable version.');
+  return { release, newer: updateAvailable(currentVersion(), release) };
 }
 
 // ---- The Android in-app installer ----
@@ -154,18 +149,14 @@ export function startUpdate(release: Release): boolean {
  * the stored version untouched and tries again next time.
  */
 export async function fetchReleaseNotes(version: string): Promise<Release | null> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 15000);
   try {
-    const res = await fetch(`https://api.github.com/repos/KeyTen4T/Earmark/releases/tags/v${version}`,
-      { headers: { Accept: 'application/vnd.github+json' }, signal: ctl.signal });
+    const res = await fetchWithTimeout(`https://api.github.com/repos/KeyTen4T/Earmark/releases/tags/v${version}`,
+      { headers: { Accept: 'application/vnd.github+json' } }, 15_000);
     if (!res.ok) return null;
     const json = await res.json();
     return parseRelease(json);
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 }
 

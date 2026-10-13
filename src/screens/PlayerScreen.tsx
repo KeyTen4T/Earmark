@@ -6,7 +6,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { C, R, T, paletteFor, fmtTime, fmtApprox, prettyName } from '../theme';
 import { Tap, Cover, Sheet, Button, IconButton, toast, Pop, FadeIn, SkipIcon, Input, AudioBadges } from '../components/ui';
 import { Scrubber } from '../components/Scrubber';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlayer, usePlayerTick } from '../player/PlayerContext';
 import { remainingBookSeconds } from '../book-math';
 import { chapterTitle } from '../torbox';
 import { formatBytes } from '../scrapers/template';
@@ -110,6 +110,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   visible: boolean; openSheet?: PlayerBarSheet; onSheetOpened?: () => void; onClose: () => void; onMeta: (all: Record<string, BookMeta>) => void;
 }) {
   const p = usePlayer();
+  const t = usePlayerTick();
   const { height } = useWindowDimensions();
   const [paneRest, setPaneRest] = useState(0); // height of the two-pane player's title and controls, measured
   // Inside an Android Modal neither the app-level insets nor SafeAreaView reliably report the
@@ -156,10 +157,10 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   }, [visible, openSheet, wide]);
 
   // The artwork leans in while the book is playing and settles back when paused.
-  const artScale = useRef(new Animated.Value(p.playing ? 1 : 0.86)).current;
+  const artScale = useRef(new Animated.Value(t.playing ? 1 : 0.86)).current;
   useEffect(() => {
-    Animated.spring(artScale, { toValue: p.playing ? 1 : 0.86, useNativeDriver: true, damping: 14, stiffness: 140, mass: 0.9 }).start();
-  }, [p.playing]);
+    Animated.spring(artScale, { toValue: t.playing ? 1 : 0.86, useNativeDriver: true, damping: 14, stiffness: 140, mass: 0.9 }).start();
+  }, [t.playing]);
 
   useEffect(() => {
     if (!visible || !p.book) return;
@@ -305,7 +306,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   const art = Math.max(120, Math.min(width - 64, artBox ? artBox - 16 : height * 0.4, 380));
   const sleepLabel = !p.sleep ? 'Sleep' : p.sleep.kind === 'chapter' ? 'End ch.' : fmtTime((p.sleep.endsAt - Date.now()) / 1000);
   // Whole-book time left, estimated from the current file's duration and the file-size ratio.
-  const bookLeft = remainingBookSeconds(p.chapters.map((f) => f.size), p.index, p.position, p.duration, p.chapters.length);
+  const bookLeft = remainingBookSeconds(p.chapters.map((f) => f.size), p.index, t.position, t.duration, p.chapters.length);
 
   const twoPane = panes.twoPane;
   // The left pane stays a comfortable fixed width; the cover is scaled to fit it rather than filling it.
@@ -327,13 +328,13 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
       record={readalongRecord!}
       fileId={p.chapters[p.index]?.id ?? -1}
       clock={{
-        position: readalongTime(raSeek, raModel, p.seekBase, p.position),
-        at: p.positionAt,
+        position: readalongTime(raSeek, raModel, p.seekBase, t.position),
+        at: t.positionAt,
         rate: p.rate,
-        playing: p.playing,
-        loading: p.loading,
-        recovering: p.recovering,
-        seekPending: p.seekPending,
+        playing: t.playing,
+        loading: t.loading,
+        recovering: t.recovering,
+        seekPending: t.seekPending,
       }}
       onSeek={(seconds) => p.seek(readalongSeekTarget(raSeek, raModel, seconds))}
       onManage={(readalong || serverReady) ? () => setSheet('readalong') : undefined}
@@ -405,9 +406,9 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         </Tap>
       ) : null}
 
-      <Scrubber position={p.position} duration={p.duration} onSeek={p.seek} step={p.seekStep} />
-      {dense && !p.recovering ? null : (
-        <Text numberOfLines={1} style={[T.small, { textAlign: 'center', marginTop: 6 }]}>{p.recovering ? 'Reconnecting…' : p.chapterName}{!p.recovering && p.local && Platform.OS !== 'web' ? ' · Downloaded' : ''}</Text>
+      <Scrubber position={t.position} duration={t.duration} onSeek={p.seek} step={p.seekStep} />
+      {dense && !t.recovering ? null : (
+        <Text numberOfLines={1} style={[T.small, { textAlign: 'center', marginTop: 6 }]}>{t.recovering ? 'Reconnecting…' : p.chapterName}{!t.recovering && p.local && Platform.OS !== 'web' ? ' · Downloaded' : ''}</Text>
       )}
       {bookLeft != null && !compact ? (
         <Text numberOfLines={1} style={[T.small, { textAlign: 'center', marginTop: 2 }]}>About {fmtApprox(bookLeft)} left in book</Text>
@@ -418,11 +419,11 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         <Tap onPress={() => p.skip(-p.skipBack)} haptic scaleTo={0.8} hitSlop={8} accessibilityLabel={`Skip back ${p.skipBack} seconds`} style={{ padding: 8 }}>
           <SkipIcon dir="back" seconds={p.skipBack} size={compact ? 28 : 34} />
         </Tap>
-        <Tap onPress={p.toggle} haptic scaleTo={0.9} accessibilityLabel={p.playing ? 'Pause' : 'Play'} style={{ width: compact ? 60 : 84, height: compact ? 60 : 84, borderRadius: compact ? 30 : 42, overflow: 'hidden' }}>
+        <Tap onPress={p.toggle} haptic scaleTo={0.9} accessibilityLabel={t.playing ? 'Pause' : 'Play'} style={{ width: compact ? 60 : 84, height: compact ? 60 : 84, borderRadius: compact ? 30 : 42, overflow: 'hidden' }}>
           <LinearGradient colors={[C.accent, C.accentDeep]} style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-            {p.loading || p.recovering ? <ActivityIndicator color={C.accentInk} size={compact ? 'small' : 'large'} /> : (
-              <Pop on={p.playing} from={0.55}>
-                <Ionicons name={p.playing ? 'pause' : 'play'} size={compact ? 28 : 40} color={C.accentInk} style={{ marginLeft: p.playing ? 0 : 4 }} />
+            {t.loading || t.recovering ? <ActivityIndicator color={C.accentInk} size={compact ? 'small' : 'large'} /> : (
+              <Pop on={t.playing} from={0.55}>
+                <Ionicons name={t.playing ? 'pause' : 'play'} size={compact ? 28 : 40} color={C.accentInk} style={{ marginLeft: t.playing ? 0 : 4 }} />
               </Pop>
             )}
           </LinearGradient>
@@ -601,6 +602,7 @@ function Pill({ icon, label, onPress, active, accessibilityLabel }: { icon: any;
 
 function ChapterList({ onPick, scrollToken = 0, style }: { onPick: (i: number) => void; scrollToken?: number; style?: any }) {
   const p = usePlayer();
+  const t = usePlayerTick();
   const ref = useRef<FlatList>(null);
   const embedded = p.embedded;
   const current = embedded ? p.embeddedIndex : p.index;
@@ -629,20 +631,20 @@ function ChapterList({ onPick, scrollToken = 0, style }: { onPick: (i: number) =
         const cur = index === current;
         const done = index < current;
         const length = item.embedded
-          ? (index + 1 < embedded!.length ? embedded![index + 1].start : Math.max(item.start, p.duration || item.start)) - item.start
+          ? (index + 1 < embedded!.length ? embedded![index + 1].start : Math.max(item.start, t.duration || item.start)) - item.start
           : 0;
         return (
           <Tap onPress={() => onPick(index)} scaleTo={0.99} accessibilityLabel={`${item.title}${cur ? ', current' : done ? ', finished' : ''}`} accessibilityState={{ selected: cur }} style={{ height: 60, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, backgroundColor: cur ? 'rgba(255,181,71,0.08)' : 'transparent' }}>
             <View style={{ width: 28, alignItems: 'center' }}>
-              {cur ? <Ionicons name={p.playing ? 'volume-high' : 'pause'} size={18} color={C.accent} /> :
+              {cur ? <Ionicons name={t.playing ? 'volume-high' : 'pause'} size={18} color={C.accent} /> :
                 done ? <Ionicons name="checkmark-circle" size={18} color={C.faint} /> :
                   <Text style={{ color: C.faint, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{index + 1}</Text>}
             </View>
             <View style={{ flex: 1 }}>
               <Text numberOfLines={1} style={{ color: cur ? C.accent : done ? C.sub : C.text, fontWeight: cur ? '700' : '500', fontSize: 15 }}>{item.title}</Text>
               <Text style={T.small}>{item.embedded
-                ? (cur ? `${fmtTime(p.position - item.start)} / ${fmtTime(length)}` : fmtTime(length))
-                : (cur && p.duration ? `${fmtTime(p.position)} / ${fmtTime(p.duration)}` : formatBytes(item.size))}</Text>
+                ? (cur ? `${fmtTime(t.position - item.start)} / ${fmtTime(length)}` : fmtTime(length))
+                : (cur && t.duration ? `${fmtTime(t.position)} / ${fmtTime(t.duration)}` : formatBytes(item.size))}</Text>
             </View>
           </Tap>
         );

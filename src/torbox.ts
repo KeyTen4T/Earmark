@@ -1,4 +1,9 @@
+import { fetchWithTimeout } from './fetch-timeout';
+
 const BASE = 'https://api.torbox.app/v1/api';
+
+/** JSON API calls: plenty for TorBox's usual reply, short enough that a dead socket cannot hang. */
+const CALL_TIMEOUT_MS = 20_000;
 
 export type TBFile = { id: number; name: string; short_name?: string; size: number; mimetype?: string };
 export type TBTorrent = {
@@ -27,13 +32,13 @@ export class TorBoxError extends Error {
   answered = false;
 }
 
-async function call<T>(token: string, path: string, init?: RequestInit): Promise<T> {
+async function call<T>(token: string, path: string, init?: RequestInit, timeoutMs = CALL_TIMEOUT_MS): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetchWithTimeout(`${BASE}${path}`, {
       ...init,
       headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
-    });
+    }, timeoutMs);
   } catch {
     throw new TorBoxError('Could not reach TorBox. Check your connection.');
   }
@@ -108,15 +113,14 @@ export async function torrentHealth(token: string, magnet: string): Promise<{ se
   const body = new FormData();
   body.append('magnet', magnet);
   body.append('timeout', '10');
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 50000);
   try {
-    const d = await call<{ seeds?: number; peers?: number } | null>(token, '/torrents/torrentinfo', { method: 'POST', body, signal: ctl.signal });
+    // TorBox itself takes 10-40s to answer this one, so it gets a longer limit than the other calls.
+    const d = await call<{ seeds?: number; peers?: number } | null>(token, '/torrents/torrentinfo', { method: 'POST', body }, 50_000);
     return d ? { seeds: Number(d.seeds) || 0, peers: Number(d.peers) || 0 } : null;
   } catch (e) {
     if (e instanceof TorBoxError && e.answered) return null;
     throw e;
-  } finally { clearTimeout(timer); }
+  }
 }
 
 export async function deleteTorrent(token: string, torrentId: number) {

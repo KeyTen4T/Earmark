@@ -11,6 +11,8 @@ import { emitLocalChange } from './sync/events';
 import { sizeWeightedFraction } from './book-math';
 import { parseStored } from './json-store';
 import { mergeRemoteBuiltins } from './scrapers/merge';
+import { serial } from './write-queue';
+import { shouldApplyRemoteProgress } from './remote-progress';
 
 const KEY = 'torbox_api_key';
 export const getApiKey = () => getSecret(KEY);
@@ -83,23 +85,36 @@ export type Progress = {
 };
 export const loadProgress = () => getJSON<Record<string, Progress>>('progress', {});
 export async function saveProgress(torrentId: number, p: Progress) {
-  const all = await loadProgress();
-  all[String(torrentId)] = p;
-  await setJSON('progress', all);
+  await serial(async () => {
+    const all = await loadProgress();
+    all[String(torrentId)] = p;
+    await setJSON('progress', all);
+  });
 }
 /** Writes progress that came from sync, exactly as received (its own `updated` is the stamp). */
 export async function applyRemoteProgress(entries: { id: number; p: Progress }[]) {
   if (!entries.length) return;
-  const all = await loadProgress();
-  for (const { id, p } of entries) all[String(id)] = p;
-  await setJSON('progress', all);
+  await serial(async () => {
+    const all = await loadProgress();
+    let changed = false;
+    for (const { id, p } of entries) {
+      const key = String(id);
+      // The player may have saved a newer position while the sync request was in flight.
+      if (!shouldApplyRemoteProgress(all[key], p)) continue;
+      all[key] = p;
+      changed = true;
+    }
+    if (changed) await setJSON('progress', all);
+  });
 }
 /** Deletes progress for the given torrent ids; used by a backup Replace. */
 export async function removeProgress(ids: number[]) {
   if (!ids.length) return;
-  const all = await loadProgress();
-  for (const id of ids) delete all[String(id)];
-  await setJSON('progress', all);
+  await serial(async () => {
+    const all = await loadProgress();
+    for (const id of ids) delete all[String(id)];
+    await setJSON('progress', all);
+  });
 }
 
 // ---- Offline downloads (device-local; deliberately absent from the sync document) ----
@@ -126,9 +141,11 @@ export async function loadEmbeddedChapters(hash: string, fileId: number): Promis
   return e && e.v === EMBEDDED_CACHE_VERSION ? e.chapters : undefined;
 }
 export async function saveEmbeddedChapters(hash: string, fileId: number, chapters: EmbeddedChapter[] | null) {
-  const all = await loadEmbeddedCache();
-  all[embeddedKey(hash, fileId)] = { v: EMBEDDED_CACHE_VERSION, chapters };
-  await setJSON('embedded_chapters', all);
+  await serial(async () => {
+    const all = await loadEmbeddedCache();
+    all[embeddedKey(hash, fileId)] = { v: EMBEDDED_CACHE_VERSION, chapters };
+    await setJSON('embedded_chapters', all);
+  });
 }
 
 // ---- Book metadata (cover/author) remembered from search, keyed by info-hash ----
@@ -145,91 +162,103 @@ const metaChanged = (before: BookMeta | undefined, after: BookMeta) => metaKey(b
 
 /** Merges several books' metadata in one write; returns the full updated map. */
 export async function saveMetaMany(patch: Record<string, BookMeta>) {
-  const all = await loadMeta();
-  const stamps = await loadStamps();
-  const now = Date.now();
-  let changed = false;
-  for (const [hash, m] of Object.entries(patch)) {
-    const key = hash.toLowerCase();
-    const before = all[key];
-    const after = { ...before, ...m };
-    all[key] = after;
-    if (metaChanged(before, after)) { stamps.meta[key] = now; changed = true; }
-  }
-  await setJSON('meta', all);
-  if (changed) { await saveStamps(stamps); emitLocalChange(); }
-  return all;
+  return serial(async () => {
+    const all = await loadMeta();
+    const stamps = await loadStamps();
+    const now = Date.now();
+    let changed = false;
+    for (const [hash, m] of Object.entries(patch)) {
+      const key = hash.toLowerCase();
+      const before = all[key];
+      const after = { ...before, ...m };
+      all[key] = after;
+      if (metaChanged(before, after)) { stamps.meta[key] = now; changed = true; }
+    }
+    await setJSON('meta', all);
+    if (changed) { await saveStamps(stamps); emitLocalChange(); }
+    return all;
+  });
 }
 /** Writes metadata from sync, stamped with the remote time and never re-stamped locally. */
 export async function applyRemoteMeta(entries: { hash: string; value: BookMeta | null; updated: number }[]) {
   if (!entries.length) return;
-  const all = await loadMeta();
-  const stamps = await loadStamps();
-  for (const e of entries) {
-    const key = e.hash.toLowerCase();
-    if (e.value === null) delete all[key];
-    else {
-      // Fields the other device has no value for keep the local one (a cover found here, say), except
-      // the finish date and rating: those are cleared by hand, so the winning record decides them.
-      const { finishedAt: _f, rating: _r, ...kept } = all[key] ?? {};
-      all[key] = { ...kept, ...e.value };
+  await serial(async () => {
+    const all = await loadMeta();
+    const stamps = await loadStamps();
+    for (const e of entries) {
+      const key = e.hash.toLowerCase();
+      if (e.value === null) delete all[key];
+      else {
+        // Fields the other device has no value for keep the local one (a cover found here, say), except
+        // the finish date and rating: those are cleared by hand, so the winning record decides them.
+        const { finishedAt: _f, rating: _r, ...kept } = all[key] ?? {};
+        all[key] = { ...kept, ...e.value };
+      }
+      stamps.meta[key] = e.updated;
     }
-    stamps.meta[key] = e.updated;
-  }
-  await setJSON('meta', all);
-  await saveStamps(stamps);
+    await setJSON('meta', all);
+    await saveStamps(stamps);
+  });
 }
 
 // ---- Books the user moved out of the main library (info-hashes). Local only; TorBox is untouched. ----
 export const loadHiddenBooks = () => getJSON<string[]>('hidden_books', []);
 const writeHidden = (hashes: string[]) => setJSON('hidden_books', hashes);
 export async function saveHiddenBooks(hashes: string[]) {
-  const before = new Set((await loadHiddenBooks()).map((h) => h.toLowerCase()));
-  const after = [...new Set(hashes.map((h) => h.toLowerCase()))];
-  const afterSet = new Set(after);
-  if (before.size === afterSet.size && after.every((h) => before.has(h))) return;
-  await writeHidden(after);
-  const stamps = await loadStamps();
-  const now = Date.now();
-  for (const h of after) if (!before.has(h)) stamps.hidden[h] = now;
-  for (const h of before) if (!afterSet.has(h)) stamps.hidden[h] = now; // removal -> tombstone stamp
-  await saveStamps(stamps);
-  emitLocalChange();
+  await serial(async () => {
+    const before = new Set((await loadHiddenBooks()).map((h) => h.toLowerCase()));
+    const after = [...new Set(hashes.map((h) => h.toLowerCase()))];
+    const afterSet = new Set(after);
+    if (before.size === afterSet.size && after.every((h) => before.has(h))) return;
+    await writeHidden(after);
+    const stamps = await loadStamps();
+    const now = Date.now();
+    for (const h of after) if (!before.has(h)) stamps.hidden[h] = now;
+    for (const h of before) if (!afterSet.has(h)) stamps.hidden[h] = now; // removal -> tombstone stamp
+    await saveStamps(stamps);
+    emitLocalChange();
+  });
 }
 export async function applyRemoteHidden(entries: { hash: string; value: boolean; updated: number }[]) {
   if (!entries.length) return;
-  const set = new Set((await loadHiddenBooks()).map((h) => h.toLowerCase()));
-  for (const e of entries) { const h = e.hash.toLowerCase(); if (e.value) set.add(h); else set.delete(h); }
-  await writeHidden([...set]);
-  const stamps = await loadStamps();
-  for (const e of entries) stamps.hidden[e.hash.toLowerCase()] = e.updated;
-  await saveStamps(stamps);
+  await serial(async () => {
+    const set = new Set((await loadHiddenBooks()).map((h) => h.toLowerCase()));
+    for (const e of entries) { const h = e.hash.toLowerCase(); if (e.value) set.add(h); else set.delete(h); }
+    await writeHidden([...set]);
+    const stamps = await loadStamps();
+    for (const e of entries) stamps.hidden[e.hash.toLowerCase()] = e.updated;
+    await saveStamps(stamps);
+  });
 }
 
 // ---- "Want to listen": books saved from the catalogue search ----
 export const loadWishlist = () => getJSON<CatalogBook[]>('wishlist', []);
 const writeWishlist = (books: CatalogBook[]) => setJSON('wishlist', books);
 export async function saveWishlist(books: CatalogBook[]) {
-  const before = await loadWishlist();
-  const beforeIds = new Set(before.map((b) => String(b.id)));
-  const afterIds = new Set(books.map((b) => String(b.id)));
-  if (beforeIds.size === afterIds.size && [...afterIds].every((id) => beforeIds.has(id))) return;
-  await writeWishlist(books);
-  const stamps = await loadStamps();
-  const now = Date.now();
-  for (const id of afterIds) if (!beforeIds.has(id)) stamps.wishlist[id] = now;
-  for (const id of beforeIds) if (!afterIds.has(id)) stamps.wishlist[id] = now; // removal -> tombstone stamp
-  await saveStamps(stamps);
-  emitLocalChange();
+  await serial(async () => {
+    const before = await loadWishlist();
+    const beforeIds = new Set(before.map((b) => String(b.id)));
+    const afterIds = new Set(books.map((b) => String(b.id)));
+    if (beforeIds.size === afterIds.size && [...afterIds].every((id) => beforeIds.has(id))) return;
+    await writeWishlist(books);
+    const stamps = await loadStamps();
+    const now = Date.now();
+    for (const id of afterIds) if (!beforeIds.has(id)) stamps.wishlist[id] = now;
+    for (const id of beforeIds) if (!afterIds.has(id)) stamps.wishlist[id] = now; // removal -> tombstone stamp
+    await saveStamps(stamps);
+    emitLocalChange();
+  });
 }
 export async function applyRemoteWishlist(entries: { id: string; value: CatalogBook | null; updated: number }[]) {
   if (!entries.length) return;
-  const map = new Map((await loadWishlist()).map((b) => [String(b.id), b]));
-  for (const e of entries) { if (e.value) map.set(e.id, e.value); else map.delete(e.id); }
-  await writeWishlist([...map.values()]);
-  const stamps = await loadStamps();
-  for (const e of entries) stamps.wishlist[e.id] = e.updated;
-  await saveStamps(stamps);
+  await serial(async () => {
+    const map = new Map((await loadWishlist()).map((b) => [String(b.id), b]));
+    for (const e of entries) { if (e.value) map.set(e.id, e.value); else map.delete(e.id); }
+    await writeWishlist([...map.values()]);
+    const stamps = await loadStamps();
+    for (const e of entries) stamps.wishlist[e.id] = e.updated;
+    await saveStamps(stamps);
+  });
 }
 
 // ---- Read-along records (anchors from tools/readalong), keyed by info-hash ----
@@ -241,39 +270,45 @@ export async function loadReadalong(hash: string): Promise<ReadalongRecord | nul
 }
 /** Saves a record for one book, stamps it now and tells sync there is a local change. */
 export async function saveReadalong(hash: string, record: ReadalongRecord) {
-  const all = await loadAllReadalong();
-  const stamps = await loadStamps();
-  const key = hash.toLowerCase();
-  all[key] = record;
-  stamps.readalong[key] = Date.now();
-  await setJSON('readalong', all);
-  await saveStamps(stamps);
-  emitLocalChange();
+  await serial(async () => {
+    const all = await loadAllReadalong();
+    const stamps = await loadStamps();
+    const key = hash.toLowerCase();
+    all[key] = record;
+    stamps.readalong[key] = Date.now();
+    await setJSON('readalong', all);
+    await saveStamps(stamps);
+    emitLocalChange();
+  });
 }
 /** Deletes a book's record; the local stamp acts as a tombstone so the delete syncs. */
 export async function deleteReadalong(hash: string) {
-  const all = await loadAllReadalong();
-  const stamps = await loadStamps();
-  const key = hash.toLowerCase();
-  delete all[key];
-  stamps.readalong[key] = Date.now();
-  await setJSON('readalong', all);
-  await saveStamps(stamps);
-  emitLocalChange();
+  await serial(async () => {
+    const all = await loadAllReadalong();
+    const stamps = await loadStamps();
+    const key = hash.toLowerCase();
+    delete all[key];
+    stamps.readalong[key] = Date.now();
+    await setJSON('readalong', all);
+    await saveStamps(stamps);
+    emitLocalChange();
+  });
 }
 /** Writes read-along records that came from sync, stamped with the remote time. */
 export async function applyRemoteReadalong(entries: { hash: string; value: ReadalongRecord | null; updated: number }[]) {
   if (!entries.length) return;
-  const all = await loadAllReadalong();
-  const stamps = await loadStamps();
-  for (const e of entries) {
-    const key = e.hash.toLowerCase();
-    if (e.value === null) delete all[key];
-    else all[key] = e.value;
-    stamps.readalong[key] = e.updated;
-  }
-  await setJSON('readalong', all);
-  await saveStamps(stamps);
+  await serial(async () => {
+    const all = await loadAllReadalong();
+    const stamps = await loadStamps();
+    for (const e of entries) {
+      const key = e.hash.toLowerCase();
+      if (e.value === null) delete all[key];
+      else all[key] = e.value;
+      stamps.readalong[key] = e.updated;
+    }
+    await setJSON('readalong', all);
+    await saveStamps(stamps);
+  });
 }
 
 // ---- Read-along build server (the URL is plain storage; the token is a secret) ----
@@ -302,9 +337,11 @@ export const loadRemovedReadElsewhere = () => getJSON<string[]>('read_elsewhere_
 export const saveRemovedReadElsewhere = (ids: string[]) => setJSON('read_elsewhere_removed', ids);
 /** Takes one entry off the shelf and remembers its id, so a later import does not restore it. */
 export async function removeReadElsewhere(id: string) {
-  const [list, removed] = await Promise.all([loadReadElsewhere(), loadRemovedReadElsewhere()]);
-  await saveReadElsewhere(list.filter((e) => e.id !== id));
-  if (!removed.includes(id)) await saveRemovedReadElsewhere([...removed, id]);
+  await serial(async () => {
+    const [list, removed] = await Promise.all([loadReadElsewhere(), loadRemovedReadElsewhere()]);
+    await saveReadElsewhere(list.filter((e) => e.id !== id));
+    if (!removed.includes(id)) await saveRemovedReadElsewhere([...removed, id]);
+  });
 }
 
 // ---- EPUB search address for the read-along builder (synced like the playback settings) ----
@@ -316,22 +353,26 @@ export const loadEbookSearchUrl = () => getJSON<string>(EBOOK_SEARCH_URL_KEY, ''
  * so a device that has never set the address keeps stamp 0 and loses to anything synced.
  */
 export async function saveEbookSearchUrl(url: string) {
-  const trimmed = url.trim();
-  const before = await loadEbookSearchUrl();
-  await setJSON(EBOOK_SEARCH_URL_KEY, trimmed);
-  if (before !== trimmed) {
-    const stamps = await loadStamps();
-    stamps.ebookSearch = Date.now();
-    await saveStamps(stamps);
-    emitLocalChange();
-  }
+  await serial(async () => {
+    const trimmed = url.trim();
+    const before = await loadEbookSearchUrl();
+    await setJSON(EBOOK_SEARCH_URL_KEY, trimmed);
+    if (before !== trimmed) {
+      const stamps = await loadStamps();
+      stamps.ebookSearch = Date.now();
+      await saveStamps(stamps);
+      emitLocalChange();
+    }
+  });
 }
 /** Writes an address that came from sync, stamped with the remote time and never re-stamped locally. */
 export async function applyRemoteEbookSearch(value: string, updated: number) {
-  await setJSON(EBOOK_SEARCH_URL_KEY, value);
-  const stamps = await loadStamps();
-  stamps.ebookSearch = updated;
-  await saveStamps(stamps);
+  await serial(async () => {
+    await setJSON(EBOOK_SEARCH_URL_KEY, value);
+    const stamps = await loadStamps();
+    stamps.ebookSearch = updated;
+    await saveStamps(stamps);
+  });
 }
 
 // ---- Pending server builds, keyed by audiobook hash (device-local, not synced) ----
@@ -360,13 +401,15 @@ export const saveDisabled = (ids: string[]) => setJSON('scrapers_disabled', ids)
  * sources after the merge. After this they are ordinary sources that can be disabled or deleted.
  */
 export async function migrateRemoteBuiltins(): Promise<ScraperDef[]> {
-  const saved = await getJSON<ScraperDef[]>('scrapers_remote_builtin', []);
-  const user = await loadUserScrapers();
-  if (!saved.length) return user;
-  const merged = mergeRemoteBuiltins(saved, user);
-  await saveUserScrapers(merged);
-  await AsyncStorage.removeItem('scrapers_remote_builtin');
-  return merged;
+  return serial(async () => {
+    const saved = await getJSON<ScraperDef[]>('scrapers_remote_builtin', []);
+    const user = await loadUserScrapers();
+    if (!saved.length) return user;
+    const merged = mergeRemoteBuiltins(saved, user);
+    await saveUserScrapers(merged);
+    await AsyncStorage.removeItem('scrapers_remote_builtin');
+    return merged;
+  });
 }
 
 // ---- Misc settings ----
@@ -376,23 +419,27 @@ const DEFAULT_SETTINGS: Settings = { rate: 1, skipBack: 15, skipForward: 30, see
 export const loadSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await getJSON<Partial<Settings>>('settings', {})) });
 const sameSettings = (a: Settings, b: Settings) => a.rate === b.rate && a.skipBack === b.skipBack && a.skipForward === b.skipForward;
 export async function saveSettings(patch: Partial<Settings>) {
-  const before = await loadSettings();
-  const after = { ...before, ...patch };
-  await setJSON('settings', after);
-  // lastBookId and seekStep are device-local: only the synced playback settings count as a real change.
-  if (!sameSettings(before, after)) {
-    const stamps = await loadStamps();
-    stamps.settings = Date.now();
-    await saveStamps(stamps);
-    emitLocalChange();
-  }
+  await serial(async () => {
+    const before = await loadSettings();
+    const after = { ...before, ...patch };
+    await setJSON('settings', after);
+    // lastBookId and seekStep are device-local: only the synced playback settings count as a real change.
+    if (!sameSettings(before, after)) {
+      const stamps = await loadStamps();
+      stamps.settings = Date.now();
+      await saveStamps(stamps);
+      emitLocalChange();
+    }
+  });
 }
 export async function applyRemoteSettings(value: Pick<Settings, 'rate' | 'skipBack' | 'skipForward'> | null, updated: number) {
-  if (value) {
-    const current = await loadSettings();
-    await setJSON('settings', { ...current, rate: value.rate, skipBack: value.skipBack, skipForward: value.skipForward });
-  }
-  const stamps = await loadStamps();
-  stamps.settings = updated;
-  await saveStamps(stamps);
+  await serial(async () => {
+    if (value) {
+      const current = await loadSettings();
+      await setJSON('settings', { ...current, rate: value.rate, skipBack: value.skipBack, skipForward: value.skipForward });
+    }
+    const stamps = await loadStamps();
+    stamps.settings = updated;
+    await saveStamps(stamps);
+  });
 }

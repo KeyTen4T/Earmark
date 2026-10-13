@@ -7,6 +7,7 @@
 // on its own never pulls in platform code.
 
 import type { ReadalongRecord } from './anchors';
+import { fetchWithTimeout } from '../fetch-timeout';
 
 /** The job lifecycle the server reports (see server.py's statuses). */
 export type JobStatus =
@@ -212,6 +213,9 @@ export function validateJob(raw: unknown): ServerJob {
 
 type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** Ordinary server requests. Large body transfers (the EPUB) do not go through here. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export type RequestOptions = { config?: ServerConfig; fetchImpl?: Fetcher };
 
 /** The server URL and token from Settings, or null when either is missing. */
@@ -237,10 +241,10 @@ async function configOrThrow(opts: RequestOptions): Promise<{ cfg: ServerConfig;
 async function send(cfg: ServerConfig, path: string, init: RequestInit, fetchImpl: Fetcher): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetchImpl(serverEndpoint(cfg.url, path), {
+    res = await fetchWithTimeout(serverEndpoint(cfg.url, path), {
       ...init,
       headers: { Authorization: `Bearer ${cfg.token}`, ...(init.headers ?? {}) },
-    });
+    }, REQUEST_TIMEOUT_MS, fetchImpl);
   } catch (e) {
     throw new ServerError(0, networkErrorMessage(e));
   }
@@ -302,15 +306,15 @@ export type ServerProbe = 'reachable' | 'token-rejected' | 'unreachable';
  */
 export async function testServer(cfg: ServerConfig, fetchImpl: Fetcher = fetch): Promise<ServerProbe> {
   try {
-    const health = await fetchImpl(serverEndpoint(cfg.url, '/v1/health'));
+    const health = await fetchWithTimeout(serverEndpoint(cfg.url, '/v1/health'), {}, REQUEST_TIMEOUT_MS, fetchImpl);
     if (!health.ok) return 'unreachable';
   } catch {
     return 'unreachable';
   }
   try {
-    const authed = await fetchImpl(serverEndpoint(cfg.url, `/v1/jobs?hash=${'0'.repeat(40)}`), {
+    const authed = await fetchWithTimeout(serverEndpoint(cfg.url, `/v1/jobs?hash=${'0'.repeat(40)}`), {
       headers: { Authorization: `Bearer ${cfg.token}` },
-    });
+    }, REQUEST_TIMEOUT_MS, fetchImpl);
     if (authed.status === 401) return 'token-rejected';
     return 'reachable'; // 200 or 404 both mean the token was accepted
   } catch {

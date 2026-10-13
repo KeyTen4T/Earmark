@@ -1,7 +1,12 @@
 // Thin GitHub Gist client for sync. Only the documented REST endpoints are used, over fetch, so
 // there is no new dependency. The token is supplied by the caller and never stored here.
+import { fetchWithTimeout } from '../fetch-timeout';
+
 const API = 'https://api.github.com';
 export const SYNC_FILE = 'earmark-sync.json';
+
+/** Plenty for a small gist; a dead socket must not hold a sync cycle forever. */
+const SYNC_TIMEOUT_MS = 20_000;
 
 /** The cached gist id no longer resolves (deleted, or no longer visible to this token). */
 export class GistMissing extends Error {}
@@ -15,7 +20,7 @@ const headers = (token: string): Record<string, string> => ({
 });
 
 const call = (token: string, path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<Response> =>
-  fetch(`${API}${path}`, { ...init, signal, headers: headers(token) });
+  fetchWithTimeout(`${API}${path}`, { ...init, signal, headers: headers(token) }, SYNC_TIMEOUT_MS);
 
 /** Confirms the token works (and implicitly that it has access to the account's gists). */
 export async function verifyToken(token: string, signal?: AbortSignal): Promise<void> {
@@ -59,7 +64,7 @@ export async function readGist(token: string, id: string, signal?: AbortSignal):
   if (!file) return null;
   if (file.truncated && file.raw_url) {
     // raw_url is pre-signed; deliberately no Authorization header on a different host.
-    const raw = await fetch(String(file.raw_url), { signal });
+    const raw = await fetchWithTimeout(String(file.raw_url), { signal }, SYNC_TIMEOUT_MS);
     if (!raw.ok) throw new Error(`Could not read the sync gist (HTTP ${raw.status})`);
     return raw.text();
   }

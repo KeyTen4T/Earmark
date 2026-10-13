@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import { View, Text, RefreshControl, Animated, Platform } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -11,7 +11,7 @@ import { Progress, BookMeta, bookFraction, loadHiddenBooks, saveHiddenBooks, sav
 import { remainingBookSeconds } from '../book-math';
 import { onSyncApplied, syncAfterProgress } from '../sync';
 import { formatBytes } from '../scrapers/template';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlayer, usePlayerTick } from '../player/PlayerContext';
 import { CoverPicker } from '../components/CoverPicker';
 import { useLayout, isTV } from '../layout';
 import { torrentToMagnet } from '../scrapers/bencode';
@@ -20,6 +20,7 @@ import { progressFraction, isComplete, type DownloadBook, type Downloads } from 
 import { matchesLibrarySearch } from '../library-search';
 import { bookFinishedAt, entryFinishedAt, formatFinishedDate, ratingAfterTap, shelfGroups } from '../shelf';
 import { syncRating } from '../hardcover';
+import { bookMetrics, cardRows, finishedRows, type BookMetrics } from '../library-rows';
 import type { ReadElsewhere } from '../reading-history';
 
 type Filter = 'all' | 'listening' | 'new' | 'done';
@@ -28,6 +29,18 @@ type Filter = 'all' | 'listening' | 'new' | 'done';
 // top of the title's first letters ("arry Potter"). The cover shrinks by the same amount so the cell
 // keeps its width and the grid does not reflow.
 const CARD_PAD = 4;
+
+type FinishedItem =
+  | { kind: 'book'; book: TBTorrent; finishedAt?: number }
+  | { kind: 'elsewhere'; entry: ReadElsewhere; finishedAt?: number };
+
+/** One row of the virtualised list: a heading, a row of grid cards, or one finished-shelf row. */
+type Row =
+  | { kind: 'heading'; key: string; label: string }
+  | { kind: 'cards'; key: string; books: TBTorrent[] }
+  | { kind: 'item'; key: string; index: number; item: FinishedItem };
+
+const rowKey = (row: { key: string }) => row.key;
 
 export function LibraryScreen(props: {
   token: string;
@@ -68,7 +81,7 @@ export function LibraryScreen(props: {
   const [showStuck, setShowStuck] = useState(false);
   // Books being removed. TorBox can keep listing one for a few seconds after confirming the delete.
   const [removing, setRemoving] = useState<number[]>([]);
-  const books = props.books.filter((b) => !removing.includes(b.id));
+  const books = useMemo(() => props.books.filter((b) => !removing.includes(b.id)), [props.books, removing]);
 
   // Books moved out of the main library. They stay in TorBox and sit in the Hidden section below.
   const [hiddenHashes, setHiddenHashes] = useState<string[]>([]);
@@ -76,7 +89,7 @@ export function LibraryScreen(props: {
   useEffect(() => { loadHiddenBooks().then(setHiddenHashes); }, []);
   // A sync from another device may have hidden or unhidden books.
   useEffect(() => onSyncApplied(() => { loadHiddenBooks().then(setHiddenHashes); }), []);
-  const isHidden = (b: TBTorrent) => hiddenHashes.includes(b.hash?.toLowerCase());
+  const isHidden = useCallback((b: TBTorrent) => hiddenHashes.includes(b.hash?.toLowerCase()), [hiddenHashes]);
   const setBookHidden = (b: TBTorrent, hide: boolean) => {
     const hash = b.hash?.toLowerCase();
     if (!hash) return;
@@ -84,8 +97,8 @@ export function LibraryScreen(props: {
     setHiddenHashes(next);
     saveHiddenBooks(next);
   };
-  const shelf = books.filter((b) => !isHidden(b));
-  const hiddenBooks = books.filter(isHidden);
+  const shelf = useMemo(() => books.filter((b) => !isHidden(b)), [books, isHidden]);
+  const hiddenBooks = useMemo(() => books.filter(isHidden), [books, isHidden]);
 
   const remove = async (b: TBTorrent) => {
     const unhide = () => setRemoving((h) => h.filter((id) => id !== b.id));
@@ -159,22 +172,10 @@ export function LibraryScreen(props: {
     toast('Removed from shelf');
   };
 
-  const ready = shelf.filter(isReady);
-  const downloading = shelf.filter((b) => !isReady(b) && !isStuck(b));
-  const stuck = shelf.filter(isStuck);
-  const m = (b: TBTorrent) => meta[b.hash?.toLowerCase()] ?? {};
-
-  // One spoken description for a library card: title, author, then how far along it is.
-  const cardLabel = (b: TBTorrent): string => {
-    const md = meta[b.hash?.toLowerCase()] ?? {};
-    const bits = [md.title ?? prettyName(b.name)];
-    if (md.author) bits.push(md.author);
-    const p = progress[b.id];
-    if (p?.finished) bits.push('finished');
-    else if (player.book?.id === b.id) bits.push('now playing');
-    else if (p) bits.push(`${Math.round(bookFraction(p, chapterList(b).map((f) => f.size)) * 100)}% listened`);
-    return bits.join(', ');
-  };
+  const ready = useMemo(() => shelf.filter(isReady), [shelf]);
+  const downloading = useMemo(() => shelf.filter((b) => !isReady(b) && !isStuck(b)), [shelf]);
+  const stuck = useMemo(() => shelf.filter(isStuck), [shelf]);
+  const m = useCallback((b: TBTorrent) => meta[b.hash?.toLowerCase()] ?? {}, [meta]);
 
   const hero = useMemo(() => {
     const byRecent = ready
@@ -187,35 +188,36 @@ export function LibraryScreen(props: {
     ? remainingBookSeconds(heroSizes, progress[hero.id].chapterIndex, progress[hero.id].position, progress[hero.id].duration, progress[hero.id].chapterCount)
     : null;
 
-  const filtered = ready.filter((b) => {
+  const filtered = useMemo(() => ready.filter((b) => {
     const p = progress[b.id];
     if (filter === 'listening') return p && !p.finished;
     if (filter === 'new') return !p;
     if (filter === 'done') return p?.finished;
     return true;
-  });
+  }), [ready, progress, filter]);
   // The search narrows whatever the chip already selected; titles, authors and narrators all match.
   const q = query.trim();
-  const shown = q ? filtered.filter((b) => matchesLibrarySearch(b.name, meta[b.hash?.toLowerCase()], q)) : filtered;
+  const shown = useMemo(
+    () => (q ? filtered.filter((b) => matchesLibrarySearch(b.name, meta[b.hash?.toLowerCase()], q)) : filtered),
+    [filtered, meta, q],
+  );
   // The Finished chip shows the shelf: finished library books and "read elsewhere" entries together,
   // in the same year groups. Elsewhere entries appear only here, never in the other filters or counts.
-  type FinishedItem =
-    | { kind: 'book'; book: TBTorrent; finishedAt?: number }
-    | { kind: 'elsewhere'; entry: ReadElsewhere; finishedAt?: number };
-  const bookItems: FinishedItem[] = shown.map((book) => ({
-    kind: 'book', book, finishedAt: bookFinishedAt(meta[book.hash?.toLowerCase() ?? ''], progress[book.id]),
-  }));
-  const entryItems: FinishedItem[] = filter === 'done'
-    ? props.readElsewhere
-        .filter((e) => !q || `${e.title} ${e.author ?? ''}`.toLowerCase().includes(q.toLowerCase()))
-        .map((entry) => ({ kind: 'elsewhere', entry, finishedAt: entryFinishedAt(entry) }))
-    : [];
-  const finishedItems = [...bookItems, ...entryItems];
-  const finishedGroups = shelfGroups(finishedItems);
+  const finishedGroups = useMemo(() => {
+    if (filter !== 'done') return [];
+    const bookItems: FinishedItem[] = shown.map((book) => ({
+      kind: 'book', book, finishedAt: bookFinishedAt(meta[book.hash?.toLowerCase() ?? ''], progress[book.id]),
+    }));
+    const entryItems: FinishedItem[] = props.readElsewhere
+      .filter((e) => !q || `${e.title} ${e.author ?? ''}`.toLowerCase().includes(q.toLowerCase()))
+      .map((entry) => ({ kind: 'elsewhere', entry, finishedAt: entryFinishedAt(entry) }));
+    return shelfGroups([...bookItems, ...entryItems]);
+  }, [filter, shown, meta, progress, props.readElsewhere, q]);
+  const finishedCount = finishedGroups.reduce((n, g) => n + g.books.length, 0);
 
-  // Two covers across on a phone; on desktop as many ~190px covers as fit. Measure the grid instead
-  // of trusting contentWidth: the screen's own scrollbar takes a slice of the width it reports, so
-  // an exact-fit row would otherwise wrap its last column and leave a gap on the right.
+  // Two covers across on a phone; on desktop as many ~190px covers as fit. Measure the list itself
+  // instead of trusting contentWidth: the screen's own scrollbar takes a slice of the width it
+  // reports, so an exact-fit row would otherwise wrap its last column and leave a gap on the right.
   const gap = wide ? 20 : 14;
   const [gridW, setGridW] = useState(0);
   const avail = wide && gridW ? gridW : contentWidth;
@@ -231,229 +233,242 @@ export function LibraryScreen(props: {
   const menuDl = menu ? downloads[menu.hash?.toLowerCase() ?? ''] : undefined;
   const menuBytes = menu ? chapterList(menu).reduce((n, f) => n + f.size, 0) : 0;
 
+  // The per-book numbers, computed once per change of the underlying data rather than per render, so
+  // an unrelated state change (a sheet opening, a filter chip) does not redo this work.
+  const nowPlayingId = player.book?.id;
+  const metrics = useMemo(() => {
+    const map = new Map<number, BookMetrics>();
+    for (const b of ready) {
+      const hash = b.hash?.toLowerCase() ?? '';
+      map.set(b.id, bookMetrics({ book: b, progress: progress[b.id], meta: meta[hash] ?? {}, download: downloads[hash], nowPlayingId }));
+    }
+    return map;
+  }, [ready, progress, meta, downloads, nowPlayingId]);
+
+  // Stable callbacks so a memoised card does not re-render when an unrelated piece of state changes.
+  const openBook = useCallback((b: TBTorrent) => {
+    onOpen(b);
+    player.open(b, meta[b.hash?.toLowerCase()] ?? {}, { autoplay: true });
+  }, [onOpen, player, meta]);
+  const menuBook = useCallback((b: TBTorrent) => setMenu(b), []);
+
+  // One flat array of rows: heading rows and rows of N cards for the grid, or heading + item rows for
+  // the finished shelf. A single FlatList with numColumns={1} then renders whatever the filter needs.
+  const rows = useMemo<Row[]>(() => {
+    if (filter === 'done') {
+      return finishedRows(finishedGroups, (item) => (item.kind === 'book' ? `b${item.book.id}` : item.entry.id)) as Row[];
+    }
+    return cardRows(shown, cols) as Row[];
+  }, [filter, finishedGroups, shown, cols]);
+
+  // The filter is part of each row's key, so a filter change remounts the rows (their entrance plays
+  // again) and leaves the header alone: the search field and a TV remote's focus on a chip survive.
+  const keyOf = useCallback((row: Row) => `${filter}:${rowKey(row)}`, [filter]);
+
+  const renderRow = ({ item: row }: { item: Row }) => {
+    if (row.kind === 'heading') {
+      return (
+        <View style={{ paddingHorizontal: 20, maxWidth: wide ? 720 : undefined, marginTop: 6 }}>
+          <Text style={[T.label, { marginBottom: 10 }]}>{row.label}</Text>
+        </View>
+      );
+    }
+    if (row.kind === 'item') {
+      const e = row.item;
+      return (
+        <View style={{ paddingHorizontal: 20, maxWidth: wide ? 720 : undefined }}>
+          {e.kind === 'book' ? (
+            <FadeIn index={row.index} delay={80}>
+              <FinishedRow book={e.book} meta={m(e.book)} finishedAt={e.finishedAt}
+                onOpen={() => { onOpen(e.book); player.open(e.book, m(e.book), { autoplay: true }); }}
+                onMenu={() => setMenu(e.book)}
+                onRate={(star) => rate(e.book, star)} />
+            </FadeIn>
+          ) : (
+            <FadeIn index={row.index} delay={80}>
+              <ElsewhereRow entry={e.entry} onMenu={() => setElsewhereMenu(e.entry)} onRate={(star) => rateElsewhere(e.entry, star)} />
+            </FadeIn>
+          )}
+        </View>
+      );
+    }
+    return (
+      <View style={{ flexDirection: 'row', paddingHorizontal: 20, gap }}>
+        {row.books.map((b, i) => {
+          const metric = metrics.get(b.id);
+          return metric ? (
+            <LibraryCard key={b.id} book={b} metric={metric} col={col} index={i} tv={isTV} onPress={openBook} onMenu={menuBook} />
+          ) : null;
+        })}
+      </View>
+    );
+  };
+
+  const loaded = props.loaded;
+  const nothing = books.length === 0 && props.readElsewhere.length === 0;
+
+  const header = !loaded ? (
+    <View style={{ paddingHorizontal: 20 }}>
+      <Skeleton height={148} radius={R.xl} style={{ marginBottom: 26 }} />
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap }}>
+        {[0, 1, 2, 3].map((i) => <Skeleton key={i} width={col} height={col} style={{ marginBottom: 8 }} />)}
+      </View>
+    </View>
+  ) : nothing ? null : (
+    <>
+      {hero && (
+        <FadeIn>
+        <Tap haptic onPress={() => openBook(hero)} onMenu={() => setMenu(hero)} scaleTo={0.98}
+          accessibilityLabel={metrics.get(hero.id)?.label} accessibilityHint="Long press for options"
+          style={{ marginHorizontal: 20, borderRadius: R.xl, overflow: 'hidden', marginBottom: 26, maxWidth: 640 }}>
+          <LinearGradient colors={[paletteFor(hero.name)[1], C.surface]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ padding: 18, flexDirection: 'row', gap: 16 }}>
+            <Cover title={hero.name} uri={m(hero).cover} size={112} radius={R.md} style={{ shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 12, elevation: 10 }} />
+            <View style={{ flex: 1, justifyContent: 'space-between' }}>
+              <View>
+                <Text style={[T.label, { color: 'rgba(255,255,255,0.7)' }]}>Continue listening</Text>
+                <Text numberOfLines={2} style={[T.h2, { marginTop: 6 }]}>{m(hero).title ?? prettyName(hero.name)}</Text>
+                <AudioBadges name={hero.name} style={{ marginTop: 6 }} />
+                {m(hero).author ? <Text numberOfLines={1} style={[T.body, { marginTop: 2 }]}>{m(hero).author}</Text> : null}
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                <View style={{ flex: 1, gap: 6 }}>
+                  <Bar value={bookFraction(progress[hero.id], heroSizes)} />
+                  <Text numberOfLines={1} style={T.small}>
+                    {progress[hero.id] ? `Chapter ${progress[hero.id].chapterIndex + 1} of ${progress[hero.id].chapterCount}` : 'Not started'}
+                    {heroLeft != null ? ` · About ${fmtApprox(heroLeft)} left` : ''}
+                  </Text>
+                </View>
+                <HeroPlayPill bookId={hero.id} />
+              </View>
+            </View>
+            <Tap onPress={(e) => { e.stopPropagation(); setMenu(hero); }} hitSlop={10} scaleTo={0.85} accessibilityLabel={`Options for ${m(hero).title ?? prettyName(hero.name)}`}
+              style={{ position: 'absolute', top: 6, right: 6, padding: 6 }}>
+              <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
+            </Tap>
+          </LinearGradient>
+        </Tap>
+        </FadeIn>
+      )}
+
+      {downloading.length > 0 && (
+        <View style={{ marginBottom: 22, maxWidth: wide ? 720 : undefined }}>
+          <Text style={[T.label, { paddingHorizontal: 20, marginBottom: 10 }]}>Preparing in TorBox</Text>
+          {downloading.map((b) => (
+            <Tap key={b.id} onMenu={() => setMenu(b)} style={{ marginHorizontal: 20, marginBottom: 8, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+              <Cover title={b.name} uri={m(b).cover} size={44} radius={8} />
+              <View style={{ flex: 1, gap: 6 }}>
+                <Text numberOfLines={1} style={T.title}>{m(b).title ?? prettyName(b.name)}</Text>
+                <Bar value={b.progress ?? 0} height={3} />
+                <Text style={T.small}>
+                  {Math.round((b.progress ?? 0) * 100)}% · {b.download_state ?? 'queued'}
+                  {b.download_speed ? ` · ${formatBytes(b.download_speed)}/s` : ''}
+                </Text>
+              </View>
+              {isTV && (
+                <Tap onPress={(e) => { e.stopPropagation(); setMenu(b); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Options for ${m(b).title ?? prettyName(b.name)}`} style={{ padding: 6 }}>
+                  <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
+                </Tap>
+              )}
+            </Tap>
+          ))}
+        </View>
+      )}
+
+      {stuck.length > 0 && (
+        <View style={{ marginBottom: 22, maxWidth: wide ? 720 : undefined }}>
+          <Tap onPress={() => setShowStuck((v) => !v)} scaleTo={0.99} style={{ marginHorizontal: 20, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+            <Ionicons name="alert-circle-outline" size={18} color={C.sub} />
+            <Text style={[T.body, { flex: 1 }]}>{stuck.length} unavailable in TorBox</Text>
+            <Ionicons name={showStuck ? 'chevron-up' : 'chevron-down'} size={16} color={C.faint} />
+          </Tap>
+          {showStuck && stuck.map((b) => (
+            <Tap key={b.id} onPress={() => setMenu(b)} onMenu={() => setMenu(b)} style={{ marginHorizontal: 20, marginTop: 8, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 12, alignItems: 'center', opacity: 0.75 }}>
+              <Cover title={b.name} uri={m(b).cover} size={44} radius={8} />
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text numberOfLines={1} style={T.title}>{m(b).title ?? prettyName(b.name)}</Text>
+                <Text style={T.small}>{b.download_state} · tap to remove or change cover</Text>
+              </View>
+            </Tap>
+          ))}
+        </View>
+      )}
+
+      {shelf.length > 8 && (
+        <View style={{ paddingHorizontal: 20, marginBottom: 14, maxWidth: 720 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: R.lg, borderWidth: 1, borderColor: C.line, paddingHorizontal: 14, height: 54 }}>
+            <Ionicons name="search" size={20} color={C.faint} />
+            <Input value={query} onChangeText={setQuery} returnKeyType="search" accessibilityLabel="Search your library"
+              placeholder="Search your library" placeholderTextColor={C.faint}
+              style={{ flex: 1, color: C.text, fontSize: 16, marginLeft: 10 }} />
+            {query ? (
+              <Tap onPress={() => setQuery('')} hitSlop={10} accessibilityLabel="Clear search"><Ionicons name="close-circle" size={20} color={C.faint} /></Tap>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      <ChipRow style={{ marginBottom: 18 }}>
+        {([['all', 'All'], ['listening', 'In progress'], ['new', 'Not started'], ['done', 'Finished']] as [Filter, string][]).map(([k, l]) => (
+          <Chip key={k} label={l} active={filter === k} onPress={() => setFilter(k)} />
+        ))}
+      </ChipRow>
+    </>
+  );
+
+  const empty = !loaded ? null : nothing ? (
+    <Empty icon="headset-outline" title="Nothing on the shelf yet"
+      body="Find a book in Discover, or add a magnet link with the + button. Anything with audio files in your TorBox shows up here."
+      action={<Button label="Discover books" icon="search" onPress={props.goDiscover} />} />
+  ) : filter === 'done' ? (
+    finishedCount === 0 ? (
+      <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'No finished books yet.'}</Text>
+    ) : null
+  ) : shown.length === 0 ? (
+    <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'Nothing here yet.'}</Text>
+  ) : null;
+
+  const footer = loaded && !nothing && hiddenBooks.length > 0 ? (
+    <View style={{ marginTop: 28, maxWidth: wide ? 720 : undefined }}>
+      <Tap onPress={() => setShowHidden((v) => !v)} scaleTo={0.99} style={{ marginHorizontal: 20, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+        <Ionicons name="eye-off-outline" size={18} color={C.sub} />
+        <Text style={[T.body, { flex: 1 }]}>Hidden · {hiddenBooks.length}</Text>
+        <Ionicons name={showHidden ? 'chevron-up' : 'chevron-down'} size={16} color={C.faint} />
+      </Tap>
+      {showHidden && hiddenBooks.map((b) => (
+        <Tap key={b.id} onPress={() => setMenu(b)} onMenu={() => setMenu(b)} style={{ marginHorizontal: 20, marginTop: 8, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+          <Cover title={b.name} uri={m(b).cover} size={44} radius={8} />
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text numberOfLines={1} style={T.title}>{m(b).title ?? prettyName(b.name)}</Text>
+            <Text numberOfLines={1} style={T.small}>{isReady(b) ? `${chapterList(b).length} chapter${chapterList(b).length === 1 ? '' : 's'} · ${formatBytes(b.size)}` : b.download_state ?? 'not ready'}</Text>
+          </View>
+          <Tap onPress={() => { setBookHidden(b, false); toast('Moved back to library'); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Unhide ${m(b).title ?? prettyName(b.name)}`} style={{ padding: 6 }}>
+            <Ionicons name="eye-outline" size={20} color={C.accent} />
+          </Tap>
+        </Tap>
+      ))}
+    </View>
+  ) : null;
+
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <Animated.ScrollView onScroll={onScroll} scrollEventThrottle={16}
+      {/* numColumns is always 1: the rows themselves hold the N-card layout, so the list can carry
+          headings and single-item finished rows without a column count fighting the grouping. */}
+      <Animated.FlatList onScroll={onScroll} scrollEventThrottle={16}
+        numColumns={1}
+        data={rows}
+        // The rows only change with the filter/layout; the per-book metrics change with progress,
+        // downloads and metadata, so tell the list to re-render its cells when those do.
+        extraData={metrics}
+        keyExtractor={keyOf}
+        renderItem={renderRow}
+        ListHeaderComponent={header}
+        ListEmptyComponent={empty}
+        ListFooterComponent={footer}
+        onLayout={(e) => setGridW(e.nativeEvent.layout.width)}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ paddingTop: insets.top + (wide ? 28 : 12), paddingBottom: props.bottomPad + 24 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={C.accent} colors={[C.accent]} progressBackgroundColor={C.elevated} />}
-      >
-        <HeroHeader y={y} label={greet} title="Library" style={{ paddingHorizontal: 20, marginBottom: 18 }}
-          right={<View style={{ flexDirection: 'row', gap: 8 }}>
-            {wide && <IconButton label="Refresh library" name="refresh" bg={C.elevated} onPress={() => refresh()} />}
-            <IconButton label="Add a book" name="add" bg={C.elevated} onPress={() => setAddOpen(true)} />
-          </View>} />
-
-        {!props.loaded ? (
-          <View style={{ paddingHorizontal: 20 }} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
-            <Skeleton height={148} radius={R.xl} style={{ marginBottom: 26 }} />
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap }}>
-              {[0, 1, 2, 3].map((i) => <Skeleton key={i} width={col} height={col} style={{ marginBottom: 8 }} />)}
-            </View>
-          </View>
-        ) : books.length === 0 && props.readElsewhere.length === 0 ? (
-          <Empty icon="headset-outline" title="Nothing on the shelf yet"
-            body="Find a book in Discover, or add a magnet link with the + button. Anything with audio files in your TorBox shows up here."
-            action={<Button label="Discover books" icon="search" onPress={props.goDiscover} />} />
-        ) : (
-          <>
-            {hero && (
-              <FadeIn>
-              <Tap haptic onPress={() => { onOpen(hero); player.open(hero, m(hero), { autoplay: true }); }} onMenu={() => setMenu(hero)} scaleTo={0.98}
-                accessibilityLabel={cardLabel(hero)} accessibilityHint="Long press for options"
-                style={{ marginHorizontal: 20, borderRadius: R.xl, overflow: 'hidden', marginBottom: 26, maxWidth: 640 }}>
-                <LinearGradient colors={[paletteFor(hero.name)[1], C.surface]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ padding: 18, flexDirection: 'row', gap: 16 }}>
-                  <Cover title={hero.name} uri={m(hero).cover} size={112} radius={R.md} style={{ shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 12, elevation: 10 }} />
-                  <View style={{ flex: 1, justifyContent: 'space-between' }}>
-                    <View>
-                      <Text style={[T.label, { color: 'rgba(255,255,255,0.7)' }]}>Continue listening</Text>
-                      <Text numberOfLines={2} style={[T.h2, { marginTop: 6 }]}>{m(hero).title ?? prettyName(hero.name)}</Text>
-                      <AudioBadges name={hero.name} style={{ marginTop: 6 }} />
-                      {m(hero).author ? <Text numberOfLines={1} style={[T.body, { marginTop: 2 }]}>{m(hero).author}</Text> : null}
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                      <View style={{ flex: 1, gap: 6 }}>
-                        <Bar value={bookFraction(progress[hero.id], heroSizes)} />
-                        <Text numberOfLines={1} style={T.small}>
-                          {progress[hero.id] ? `Chapter ${progress[hero.id].chapterIndex + 1} of ${progress[hero.id].chapterCount}` : 'Not started'}
-                          {heroLeft != null ? ` · About ${fmtApprox(heroLeft)} left` : ''}
-                        </Text>
-                      </View>
-                      <View style={{ width: 46, height: 46, borderRadius: 23, backgroundColor: C.text, alignItems: 'center', justifyContent: 'center' }}>
-                        <Pop on={player.book?.id === hero.id && player.playing} from={0.6}>
-                          <Ionicons name={player.book?.id === hero.id && player.playing ? 'pause' : 'play'} size={22} color={C.bg} style={{ marginLeft: 2 }} />
-                        </Pop>
-                      </View>
-                    </View>
-                  </View>
-                  <Tap onPress={(e) => { e.stopPropagation(); setMenu(hero); }} hitSlop={10} scaleTo={0.85} accessibilityLabel={`Options for ${m(hero).title ?? prettyName(hero.name)}`}
-                    style={{ position: 'absolute', top: 6, right: 6, padding: 6 }}>
-                    <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
-                  </Tap>
-                </LinearGradient>
-              </Tap>
-              </FadeIn>
-            )}
-
-            {downloading.length > 0 && (
-              <View style={{ marginBottom: 22, maxWidth: wide ? 720 : undefined }}>
-                <Text style={[T.label, { paddingHorizontal: 20, marginBottom: 10 }]}>Preparing in TorBox</Text>
-                {downloading.map((b) => (
-                  <Tap key={b.id} onMenu={() => setMenu(b)} style={{ marginHorizontal: 20, marginBottom: 8, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 12, alignItems: 'center' }}>
-                    <Cover title={b.name} uri={m(b).cover} size={44} radius={8} />
-                    <View style={{ flex: 1, gap: 6 }}>
-                      <Text numberOfLines={1} style={T.title}>{m(b).title ?? prettyName(b.name)}</Text>
-                      <Bar value={b.progress ?? 0} height={3} />
-                      <Text style={T.small}>
-                        {Math.round((b.progress ?? 0) * 100)}% · {b.download_state ?? 'queued'}
-                        {b.download_speed ? ` · ${formatBytes(b.download_speed)}/s` : ''}
-                      </Text>
-                    </View>
-                    {isTV && (
-                      <Tap onPress={(e) => { e.stopPropagation(); setMenu(b); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Options for ${m(b).title ?? prettyName(b.name)}`} style={{ padding: 6 }}>
-                        <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
-                      </Tap>
-                    )}
-                  </Tap>
-                ))}
-              </View>
-            )}
-
-            {stuck.length > 0 && (
-              <View style={{ marginBottom: 22, maxWidth: wide ? 720 : undefined }}>
-                <Tap onPress={() => setShowStuck((v) => !v)} scaleTo={0.99} style={{ marginHorizontal: 20, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 10, alignItems: 'center' }}>
-                  <Ionicons name="alert-circle-outline" size={18} color={C.sub} />
-                  <Text style={[T.body, { flex: 1 }]}>{stuck.length} unavailable in TorBox</Text>
-                  <Ionicons name={showStuck ? 'chevron-up' : 'chevron-down'} size={16} color={C.faint} />
-                </Tap>
-                {showStuck && stuck.map((b) => (
-                  <Tap key={b.id} onPress={() => setMenu(b)} onMenu={() => setMenu(b)} style={{ marginHorizontal: 20, marginTop: 8, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 12, alignItems: 'center', opacity: 0.75 }}>
-                    <Cover title={b.name} uri={m(b).cover} size={44} radius={8} />
-                    <View style={{ flex: 1, gap: 3 }}>
-                      <Text numberOfLines={1} style={T.title}>{m(b).title ?? prettyName(b.name)}</Text>
-                      <Text style={T.small}>{b.download_state} · tap to remove or change cover</Text>
-                    </View>
-                  </Tap>
-                ))}
-              </View>
-            )}
-
-            {shelf.length > 8 && (
-              <View style={{ paddingHorizontal: 20, marginBottom: 14, maxWidth: 720 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: R.lg, borderWidth: 1, borderColor: C.line, paddingHorizontal: 14, height: 54 }}>
-                  <Ionicons name="search" size={20} color={C.faint} />
-                  <Input value={query} onChangeText={setQuery} returnKeyType="search" accessibilityLabel="Search your library"
-                    placeholder="Search your library" placeholderTextColor={C.faint}
-                    style={{ flex: 1, color: C.text, fontSize: 16, marginLeft: 10 }} />
-                  {query ? (
-                    <Tap onPress={() => setQuery('')} hitSlop={10} accessibilityLabel="Clear search"><Ionicons name="close-circle" size={20} color={C.faint} /></Tap>
-                  ) : null}
-                </View>
-              </View>
-            )}
-
-            <ChipRow style={{ marginBottom: 18 }}>
-              {([['all', 'All'], ['listening', 'In progress'], ['new', 'Not started'], ['done', 'Finished']] as [Filter, string][]).map(([k, l]) => (
-                <Chip key={k} label={l} active={filter === k} onPress={() => setFilter(k)} />
-              ))}
-            </ChipRow>
-
-            {filter === 'done' ? (
-              finishedItems.length === 0 ? (
-                <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'No finished books yet.'}</Text>
-              ) : (
-                <View style={{ paddingHorizontal: 20, maxWidth: wide ? 720 : undefined }}>
-                  {finishedGroups.map((g) => (
-                    <View key={g.year ?? 'earlier'} style={{ marginBottom: 22 }}>
-                      <Text style={[T.label, { marginBottom: 10 }]}>{g.label}</Text>
-                      {g.books.map((e, i) => (
-                        e.kind === 'book' ? (
-                          <FadeIn key={`b${e.book.id}`} index={i} delay={80}>
-                            <FinishedRow book={e.book} meta={m(e.book)} finishedAt={e.finishedAt}
-                              onOpen={() => { onOpen(e.book); player.open(e.book, m(e.book), { autoplay: true }); }}
-                              onMenu={() => setMenu(e.book)}
-                              onRate={(star) => rate(e.book, star)} />
-                          </FadeIn>
-                        ) : (
-                          <FadeIn key={e.entry.id} index={i} delay={80}>
-                            <ElsewhereRow entry={e.entry} onMenu={() => setElsewhereMenu(e.entry)} onRate={(star) => rateElsewhere(e.entry, star)} />
-                          </FadeIn>
-                        )
-                      ))}
-                    </View>
-                  ))}
-                </View>
-              )
-            ) : shown.length === 0 ? (
-              <Text style={[T.body, { textAlign: 'center', marginTop: 30 }]}>{q ? `Nothing matches “${q}”.` : 'Nothing here yet.'}</Text>
-            ) : (
-              <View key={filter} style={{ flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 20, gap }} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
-                {shown.map((b, i) => {
-                  const p = progress[b.id];
-                  const md = m(b);
-                  const playing = player.book?.id === b.id;
-                  const dl = downloads[b.hash?.toLowerCase() ?? ''];
-                  const sizes = chapterList(b).map((f) => f.size);
-                  const left = p && !p.finished ? remainingBookSeconds(sizes, p.chapterIndex, p.position, p.duration, p.chapterCount) : null;
-                  return (
-                    <FadeIn key={b.id} index={i} delay={80} style={{ width: col, marginBottom: 8 }}>
-                    <Tap haptic onPress={() => { onOpen(b); player.open(b, md, { autoplay: true }); }} onMenu={() => setMenu(b)} accessibilityLabel={cardLabel(b)} accessibilityHint="Long press for options" hoverStyle={{ backgroundColor: C.hover, borderRadius: R.md }} style={isTV ? { padding: CARD_PAD } : undefined}>
-                      <View>
-                        <Cover title={b.name} uri={md.cover} size={isTV ? col - CARD_PAD * 2 : col} radius={R.md} />
-                        {p?.finished && (
-                          <View style={{ position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: R.pill, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', gap: 4, alignItems: 'center' }}>
-                            <Ionicons name="checkmark" size={12} color={C.good} /><Text style={{ color: C.text, fontSize: 11, fontWeight: '700' }}>Done</Text>
-                          </View>
-                        )}
-                        {playing && (
-                          <View style={{ position: 'absolute', bottom: 8, left: 8, backgroundColor: C.accent, borderRadius: R.pill, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', gap: 4, alignItems: 'center' }}>
-                            <Ionicons name="volume-high" size={12} color={C.accentInk} /><Text style={{ color: C.accentInk, fontSize: 11, fontWeight: '800' }}>Now playing</Text>
-                          </View>
-                        )}
-                        {Platform.OS !== 'web' && dl ? <DownloadMark rec={dl} /> : null}
-                      </View>
-                      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 2, marginTop: 10 }}>
-                        <Text numberOfLines={2} style={[T.title, { flex: 1, fontSize: 14 }]}>{md.title ?? prettyName(b.name)}</Text>
-                        <Tap onPress={(e) => { e.stopPropagation(); setMenu(b); }} hitSlop={10} scaleTo={0.85} accessibilityLabel={`Options for ${md.title ?? prettyName(b.name)}`} style={{ padding: 4, marginVertical: -4 }}>
-                          <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
-                        </Tap>
-                      </View>
-                      <AudioBadges name={b.name} style={{ marginTop: 6 }} />
-                      <Text numberOfLines={1} style={[T.small, { marginTop: 3 }]}>
-                        {md.author ?? `${chapterList(b).length} chapter${chapterList(b).length === 1 ? '' : 's'} · ${formatBytes(b.size)}`}
-                      </Text>
-                      {p && !p.finished ? <View style={{ marginTop: 8 }}><Bar value={bookFraction(p, sizes)} height={3} /></View> : null}
-                      {left != null ? <Text numberOfLines={1} style={[T.small, { marginTop: 4 }]}>About {fmtApprox(left)} left</Text> : null}
-                    </Tap>
-                    </FadeIn>
-                  );
-                })}
-              </View>
-            )}
-
-            {hiddenBooks.length > 0 && (
-              <View style={{ marginTop: 28, maxWidth: wide ? 720 : undefined }}>
-                <Tap onPress={() => setShowHidden((v) => !v)} scaleTo={0.99} style={{ marginHorizontal: 20, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 10, alignItems: 'center' }}>
-                  <Ionicons name="eye-off-outline" size={18} color={C.sub} />
-                  <Text style={[T.body, { flex: 1 }]}>Hidden · {hiddenBooks.length}</Text>
-                  <Ionicons name={showHidden ? 'chevron-up' : 'chevron-down'} size={16} color={C.faint} />
-                </Tap>
-                {showHidden && hiddenBooks.map((b) => (
-                  <Tap key={b.id} onPress={() => setMenu(b)} onMenu={() => setMenu(b)} style={{ marginHorizontal: 20, marginTop: 8, padding: 12, borderRadius: R.md, backgroundColor: C.surface, flexDirection: 'row', gap: 12, alignItems: 'center' }}>
-                    <Cover title={b.name} uri={m(b).cover} size={44} radius={8} />
-                    <View style={{ flex: 1, gap: 3 }}>
-                      <Text numberOfLines={1} style={T.title}>{m(b).title ?? prettyName(b.name)}</Text>
-                      <Text numberOfLines={1} style={T.small}>{isReady(b) ? `${chapterList(b).length} chapter${chapterList(b).length === 1 ? '' : 's'} · ${formatBytes(b.size)}` : b.download_state ?? 'not ready'}</Text>
-                    </View>
-                    <Tap onPress={() => { setBookHidden(b, false); toast('Moved back to library'); }} hitSlop={8} scaleTo={0.85} accessibilityLabel={`Unhide ${m(b).title ?? prettyName(b.name)}`} style={{ padding: 6 }}>
-                      <Ionicons name="eye-outline" size={20} color={C.accent} />
-                    </Tap>
-                  </Tap>
-                ))}
-              </View>
-            )}
-          </>
-        )}
-      </Animated.ScrollView>
+      />
       <StickyBar y={y} title="Library" />
 
       <AddMagnetSheet visible={addOpen} onClose={() => setAddOpen(false)} token={props.token} onAdded={props.onAdded} />
@@ -527,6 +542,69 @@ export function LibraryScreen(props: {
     </View>
   );
 }
+
+/** The Continue card's play/pause circle, isolated so the live `playing` tick never re-renders the
+ * whole Library screen. */
+function HeroPlayPill({ bookId }: { bookId: number }) {
+  const { book } = usePlayer();
+  const { playing } = usePlayerTick();
+  const active = book?.id === bookId && playing;
+  return (
+    <View style={{ width: 46, height: 46, borderRadius: 23, backgroundColor: C.text, alignItems: 'center', justifyContent: 'center' }}>
+      <Pop on={active} from={0.6}>
+        <Ionicons name={active ? 'pause' : 'play'} size={22} color={C.bg} style={{ marginLeft: 2 }} />
+      </Pop>
+    </View>
+  );
+}
+
+/**
+ * One book in the grid. Memoised with stable props (the precomputed metrics object, stable callbacks)
+ * so an unrelated Library state change does not re-render every card.
+ */
+const LibraryCard = React.memo(function LibraryCard({ book, metric, col, index, tv, onPress, onMenu }: {
+  book: TBTorrent;
+  metric: BookMetrics;
+  col: number;
+  index: number;
+  tv: boolean;
+  onPress: (b: TBTorrent) => void;
+  onMenu: (b: TBTorrent) => void;
+}) {
+  const dl = metric.download;
+  return (
+    <FadeIn index={index} delay={80} style={{ width: col, marginBottom: 8 }}>
+      <Tap haptic onPress={() => onPress(book)} onMenu={() => onMenu(book)} accessibilityLabel={metric.label} accessibilityHint="Long press for options" hoverStyle={{ backgroundColor: C.hover, borderRadius: R.md }} style={tv ? { padding: CARD_PAD } : undefined}>
+        <View>
+          <Cover title={book.name} uri={metric.cover} size={tv ? col - CARD_PAD * 2 : col} radius={R.md} />
+          {metric.finished && (
+            <View style={{ position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: R.pill, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+              <Ionicons name="checkmark" size={12} color={C.good} /><Text style={{ color: C.text, fontSize: 11, fontWeight: '700' }}>Done</Text>
+            </View>
+          )}
+          {metric.playing && (
+            <View style={{ position: 'absolute', bottom: 8, left: 8, backgroundColor: C.accent, borderRadius: R.pill, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+              <Ionicons name="volume-high" size={12} color={C.accentInk} /><Text style={{ color: C.accentInk, fontSize: 11, fontWeight: '800' }}>Now playing</Text>
+            </View>
+          )}
+          {Platform.OS !== 'web' && dl ? <DownloadMark rec={dl} /> : null}
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 2, marginTop: 10 }}>
+          <Text numberOfLines={2} style={[T.title, { flex: 1, fontSize: 14 }]}>{metric.title}</Text>
+          <Tap onPress={(e) => { e.stopPropagation(); onMenu(book); }} hitSlop={10} scaleTo={0.85} accessibilityLabel={`Options for ${metric.title}`} style={{ padding: 4, marginVertical: -4 }}>
+            <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
+          </Tap>
+        </View>
+        <AudioBadges name={book.name} style={{ marginTop: 6 }} />
+        <Text numberOfLines={1} style={[T.small, { marginTop: 3 }]}>
+          {metric.author ?? `${metric.chapterCount} chapter${metric.chapterCount === 1 ? '' : 's'} · ${formatBytes(book.size)}`}
+        </Text>
+        {metric.hasProgress && !metric.finished ? <View style={{ marginTop: 8 }}><Bar value={metric.fraction} height={3} /></View> : null}
+        {metric.leftSeconds != null ? <Text numberOfLines={1} style={[T.small, { marginTop: 4 }]}>About {fmtApprox(metric.leftSeconds)} left</Text> : null}
+      </Tap>
+    </FadeIn>
+  );
+});
 
 function EditDetailsSheet({ visible, onClose, book, meta, onSaved }: {
   visible: boolean; onClose: () => void; book: TBTorrent; meta: BookMeta; onSaved: (all: Record<string, BookMeta>) => void;

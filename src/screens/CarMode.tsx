@@ -6,7 +6,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { C, R, fmtTime, paletteFor } from '../theme';
 import { Tap, Bar, SkipIcon } from '../components/ui';
-import { usePlayer } from '../player/PlayerContext';
+import { usePlayer, usePlayerTick } from '../player/PlayerContext';
 import { useEscape } from '../escape';
 import { carProgress, carRemaining, carChapterLine } from '../player/car-mode';
 
@@ -22,6 +22,7 @@ const KEEP_AWAKE_TAG = 'earmark-car-mode';
  */
 export function CarMode({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const p = usePlayer();
+  const t = usePlayerTick();
   const { height } = useWindowDimensions();
   // Inside a nested Android Modal the insets can be wrong, so reserve at least a three-button nav
   // bar the way the player does, keeping the bottom row clear.
@@ -43,7 +44,7 @@ export function CarMode({ visible, onClose }: { visible: boolean; onClose: () =>
   const skipH = Math.max(64, Math.min(96, Math.round(skip * 0.5)));
   const titleSize = Math.max(26, Math.round(play * 0.14));
   const [c1] = paletteFor(p.book.name);
-  const remaining = carRemaining(p.position, p.duration);
+  const remaining = carRemaining(t.position, t.duration);
   const chapter = carChapterLine(p.chapterIndex, p.chapterCount, p.chapterName, p.displayTitle);
   const lastChapter = p.chapterIndex >= p.chapterCount - 1;
 
@@ -83,12 +84,12 @@ export function CarMode({ visible, onClose }: { visible: boolean; onClose: () =>
             </View>
 
             <View style={{ alignItems: 'center', gap: 12 }}>
-              <Tap onPress={p.toggle} haptic scaleTo={0.95} accessibilityLabel={p.playing ? 'Pause' : 'Play'}
-                accessibilityState={{ busy: p.loading || p.recovering }}
+              <Tap onPress={p.toggle} haptic scaleTo={0.95} accessibilityLabel={t.playing ? 'Pause' : 'Play'}
+                accessibilityState={{ busy: t.loading || t.recovering }}
                 style={{ width: play, height: play, borderRadius: play / 2, overflow: 'hidden' }}>
                 <LinearGradient colors={[C.accent, C.accentDeep]} style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-                  {p.loading || p.recovering ? <ActivityIndicator color={C.accentInk} size="large" /> : (
-                    <Ionicons name={p.playing ? 'pause' : 'play'} size={Math.round(play * 0.4)} color={C.accentInk} style={{ marginLeft: p.playing ? 0 : 6 }} />
+                  {t.loading || t.recovering ? <ActivityIndicator color={C.accentInk} size="large" /> : (
+                    <Ionicons name={t.playing ? 'pause' : 'play'} size={Math.round(play * 0.4)} color={C.accentInk} style={{ marginLeft: t.playing ? 0 : 6 }} />
                   )}
                 </LinearGradient>
               </Tap>
@@ -99,9 +100,9 @@ export function CarMode({ visible, onClose }: { visible: boolean; onClose: () =>
             </View>
 
             <View>
-              <Bar value={carProgress(p.position, p.duration)} height={5} />
+              <Bar value={carProgress(t.position, t.duration)} height={5} />
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
-                <Text style={{ color: C.text, fontSize: 22, fontWeight: '700', lineHeight: 26, fontVariant: ['tabular-nums'] }}>{fmtTime(p.position)}</Text>
+                <Text style={{ color: C.text, fontSize: 22, fontWeight: '700', lineHeight: 26, fontVariant: ['tabular-nums'] }}>{fmtTime(t.position)}</Text>
                 <Text style={{ color: C.sub, fontSize: 22, fontWeight: '700', lineHeight: 26, fontVariant: ['tabular-nums'] }}>-{fmtTime(remaining)}</Text>
               </View>
             </View>

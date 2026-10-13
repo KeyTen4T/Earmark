@@ -1,6 +1,7 @@
 import { render, getPath, formatBytes, decodeEntities } from './template';
 import type { Vars } from './template';
 import { torrentToMagnet, hashFromMagnet } from './bencode';
+import { fetchWithTimeout } from '../fetch-timeout';
 
 export type FieldMap = {
   title: string;
@@ -115,7 +116,7 @@ function regexRows(text: string, pattern: string, flags = 'gi'): Vars[] {
 }
 
 async function request(fetcher: Fetcher, url: string, method = 'GET', headers?: Record<string, string>, body?: string) {
-  const res = await fetcher(url, { method, headers: { 'User-Agent': UA, ...headers }, body: method === 'POST' ? body : undefined });
+  const res = await fetchWithTimeout(url, { method, headers: { 'User-Agent': UA, ...headers }, body: method === 'POST' ? body : undefined }, 20_000, fetcher);
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${url.replace(/\?.*/, '')}`);
   return res;
 }

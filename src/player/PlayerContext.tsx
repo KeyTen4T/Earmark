@@ -10,7 +10,7 @@ import { prettyName } from '../theme';
 import { syncProgress } from '../hardcover';
 import { syncNow, syncAfterProgress, onSyncApplied } from '../sync';
 import { decideRecovery, nextRecovery, recoverySettled, STALL_MS, type PlaybackSnapshot } from './recovery';
-import { shouldPushUpdate } from './visibility';
+import { shouldPushUpdate, TICK_FIELDS } from './visibility';
 import { detectJump, seekSettled } from './seekbase';
 import { localUriFor, markFileForRedownload } from '../downloads';
 
@@ -52,7 +52,23 @@ type PlayerState = {
   seekStep: number;
 };
 
-type PlayerApi = PlayerState & {
+/** A field a playback status tick can move; these are the ones held back while backgrounded. */
+type TickField = (typeof TICK_FIELDS)[number];
+
+/** The per-tick slice of the player state. Read with {@link usePlayerTick}; it changes several times a second. */
+type PlayerTick = Pick<PlayerState, TickField>;
+
+/** The action functions: stable identities, so the stable context value never changes per tick. */
+type PlayerActions = Pick<PlayerApi, 'open' | 'toggle' | 'seek' | 'skip' | 'goChapter' | 'pickChapter'
+  | 'prevChapter' | 'nextChapter' | 'setRate' | 'setSleep' | 'setSkips' | 'setSeekStep' | 'stop'
+  | 'updateMeta' | 'isPlaying'>;
+
+/**
+ * Everything that is NOT a per-tick field, plus the actions and the chapter-derived values. The value
+ * identity only changes when one of these fields changes, so `usePlayer()` consumers are not
+ * re-rendered by a playback status tick.
+ */
+type PlayerApi = Omit<PlayerState, TickField> & {
   open: (book: TBTorrent, meta: BookMeta, opts?: { autoplay?: boolean; chapter?: number }) => Promise<void>;
   toggle: () => void;
   seek: (seconds: number) => void;
@@ -69,6 +85,8 @@ type PlayerApi = PlayerState & {
   stop: () => void;
   /** Refreshes the now-playing book's metadata (e.g. a new cover); ignored if another book is playing. */
   updateMeta: (bookId: number, m: BookMeta) => void;
+  /** Whether a book is loaded and playing, read on demand so a caller need not subscribe to ticks. */
+  isPlaying: () => boolean;
   displayTitle: string;
   chapterName: string;
   /** Index of the embedded chapter playing now, or the file index when there are none. */
@@ -79,10 +97,18 @@ type PlayerApi = PlayerState & {
   embeddedIndex: number;
 };
 
-const Ctx = createContext<PlayerApi | null>(null);
+const StableCtx = createContext<PlayerApi | null>(null);
+const TickCtx = createContext<PlayerTick | null>(null);
+/** The player state that is not a per-tick field: safe for a whole screen to subscribe to. */
 export const usePlayer = () => {
-  const c = useContext(Ctx);
+  const c = useContext(StableCtx);
   if (!c) throw new Error('usePlayer outside PlayerProvider');
+  return c;
+};
+/** The per-tick player fields (position, duration, playing, …): only for what draws them. */
+export const usePlayerTick = () => {
+  const c = useContext(TickCtx);
+  if (!c) throw new Error('usePlayerTick outside PlayerProvider');
   return c;
 };
 
@@ -289,7 +315,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     // A real change of finished state stamps or clears the finish date on the book's metadata. It
     // only fires on the transition, so a book already finished on open keeps its stored date.
     const wasDone = finishedRef.current.id === c.book.id && finishedRef.current.done;
-    if (c.book.hash && finished !== wasDone) void saveMeta(c.book.hash, { finishedAt: finished ? now : undefined });
+    if (c.book.hash && finished !== wasDone) void saveMeta(c.book.hash, { finishedAt: finished ? now : undefined }).catch(() => {});
     finishedRef.current = { id: c.book.id, done: finished };
     void saveProgress(c.book.id, {
       fileId: c.chapters[c.index].id,
@@ -722,20 +748,50 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     if (st.current.book?.id === bookId) patch({ meta: { ...st.current.meta, ...m } });
   };
 
-  const value = useMemo<PlayerApi>(() => {
-    const embedded = s.embedded;
-    const embeddedIndex = embedded ? chapterAt(embedded, s.position) : -1;
-    return {
-      ...s, open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep, setSkips, setSeekStep, stop, updateMeta,
-      displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
-      chapterName: embedded
-        ? embedded[embeddedIndex]?.title ?? ''
-        : s.chapters[s.index] ? chapterTitle(s.chapters[s.index]) : '',
-      chapterIndex: embedded ? embeddedIndex : s.index,
-      chapterCount: embedded ? embedded.length : s.chapters.length,
-      embeddedIndex,
-    };
-  }, [s]);
+  // The context hands out one permanent wrapper per action that calls this render's copy, so the
+  // identities are stable (the stable value must not change per tick) and a new `token` is still seen.
+  const latest = useRef<PlayerActions>(null as unknown as PlayerActions);
+  latest.current = {
+    open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep,
+    setSkips, setSeekStep, stop, updateMeta,
+    isPlaying: () => st.current.playing,
+  };
+  const actions = useMemo(() => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(latest.current) as (keyof PlayerActions)[]) {
+      out[k] = (...args: unknown[]) => (latest.current[k] as (...a: unknown[]) => unknown)(...args);
+    }
+    return out as PlayerActions;
+  }, []);
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  // The chapter-derived values depend on position, but only need to reach React when the chapter
+  // actually changes. `embeddedIndex` is recomputed each render but is a primitive, so it is a
+  // dependency of the stable memo below: a tick within one chapter leaves the value identity intact.
+  const embeddedIndex = s.embedded ? chapterAt(s.embedded, s.position) : -1;
+  const chapterIndex = s.embedded ? embeddedIndex : s.index;
+  const chapterName = s.embedded
+    ? s.embedded[embeddedIndex]?.title ?? ''
+    : s.chapters[s.index] ? chapterTitle(s.chapters[s.index]) : '';
+  const chapterCount = s.embedded ? s.embedded.length : s.chapters.length;
+
+  const value = useMemo<PlayerApi>(() => ({
+    ...actions,
+    book: s.book, meta: s.meta, chapters: s.chapters, embedded: s.embedded, index: s.index,
+    seekBase: s.seekBase, local: s.local, rate: s.rate, error: s.error, sleep: s.sleep,
+    skipBack: s.skipBack, skipForward: s.skipForward, seekStep: s.seekStep,
+    displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
+    chapterName, chapterIndex, chapterCount, embeddedIndex,
+  }), [actions, s.book, s.meta, s.chapters, s.embedded, s.index, s.seekBase, s.local, s.rate, s.error,
+    s.sleep, s.skipBack, s.skipForward, s.seekStep, embeddedIndex, chapterName, chapterIndex, chapterCount]);
+
+  const tick = useMemo<PlayerTick>(() => ({
+    position: s.position, positionAt: s.positionAt, seekPending: s.seekPending,
+    duration: s.duration, playing: s.playing, loading: s.loading, recovering: s.recovering,
+  }), [s.position, s.positionAt, s.seekPending, s.duration, s.playing, s.loading, s.recovering]);
+
+  return (
+    <StableCtx.Provider value={value}>
+      <TickCtx.Provider value={tick}>{children}</TickCtx.Provider>
+    </StableCtx.Provider>
+  );
 }

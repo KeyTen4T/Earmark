@@ -4,6 +4,7 @@
 // ratings-match.ts; this module only does the network calls and the per-session cache.
 // Docs: https://openlibrary.org/dev/docs/api/search · https://docs.hardcover.app/api/
 import { getHcToken, searchBooks, gql } from './hardcover';
+import { fetchWithTimeout } from './fetch-timeout';
 import {
   BookKey, RatingCandidate, Review,
   cleanBookTitle, findClearMatch, olSearchUrl, parseOlDocs, parseReviews, pickBestRating, toNumber,
@@ -19,7 +20,7 @@ export type BookInfo = { rating?: Rating; reviews?: Review[]; slug?: string };
 const cache = new Map<string, BookInfo>();
 
 async function getJSON(url: string, fetcher: typeof fetch) {
-  const res = await fetcher(url, { headers: { 'User-Agent': 'Earmark audiobook app' } });
+  const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Earmark audiobook app' } }, 20_000, fetcher);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

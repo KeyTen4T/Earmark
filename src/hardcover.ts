@@ -3,6 +3,8 @@
 import { getSecret, setSecret, deleteSecret } from './secure';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { mapHardcoverHistory, type ReadElsewhere } from './reading-history';
+import { serial } from './write-queue';
+import { fetchWithTimeout } from './fetch-timeout';
 
 const URL = 'https://api.hardcover.app/v1/graphql';
 const KEY = 'hardcover_token';
@@ -24,11 +26,11 @@ export async function setHcToken(t: string | null) {
 export async function gql<T>(query: string, variables: Record<string, unknown> = {}, token?: string | null): Promise<T> {
   const t = token ?? (await getHcToken());
   if (!t) throw new Error('Hardcover is not connected');
-  const res = await fetch(URL, {
+  const res = await fetchWithTimeout(URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${t}`, 'user-agent': 'Earmark audiobook player (Android)' },
     body: JSON.stringify({ query, variables }),
-  });
+  }, 20_000);
   let json: any;
   try { json = await res.json(); } catch { throw new Error(`Hardcover returned HTTP ${res.status}`); }
   if (res.status === 401 || res.status === 403) throw new Error('Hardcover rejected the token');
@@ -137,15 +139,18 @@ async function loadLinks(): Promise<Record<string, HcLink>> {
 }
 export async function getLink(torrentId: number) { return (await loadLinks())[String(torrentId)]; }
 async function putLink(torrentId: number, l: HcLink | null) {
-  const all = await loadLinks();
-  if (l) all[String(torrentId)] = l; else delete all[String(torrentId)];
-  await AsyncStorage.setItem('hc_links', JSON.stringify(all));
+  // Shares storage.ts's write queue: backup import and a sync push can both touch hc_links.
+  await serial(async () => {
+    const all = await loadLinks();
+    if (l) all[String(torrentId)] = l; else delete all[String(torrentId)];
+    await AsyncStorage.setItem('hc_links', JSON.stringify(all));
+  });
 }
 export const unlink = (torrentId: number) => putLink(torrentId, null);
 
 /** All torrent <-> Hardcover links, for a backup. Not secret: contains no token. */
 export const loadHcLinks = (): Promise<Record<string, HcLink>> => loadLinks();
-export const saveHcLinks = (all: Record<string, HcLink>) => AsyncStorage.setItem('hc_links', JSON.stringify(all));
+export const saveHcLinks = (all: Record<string, HcLink>) => serial(() => AsyncStorage.setItem('hc_links', JSON.stringify(all)));
 
 const today = () => new Date().toISOString().slice(0, 10);
 

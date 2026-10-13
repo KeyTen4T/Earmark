@@ -7,6 +7,7 @@
 
 import { formatBytes } from '../scrapers/template';
 import { hashFromMagnet } from '../scrapers/bencode';
+import { fetchWithTimeout } from '../fetch-timeout';
 
 /** readalong.py's `--limit` default. */
 export const EBOOK_SEARCH_LIMIT = 25;
@@ -97,11 +98,11 @@ export async function searchEbooks(
   opts: { limit?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<EbookResult[]> {
   const doFetch = opts.fetchImpl ?? fetch;
-  const res = await doFetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, author, limit: opts.limit ?? EBOOK_SEARCH_LIMIT, contentType: 'ebook' }),
-  });
+  }, 20_000, doFetch);
   if (!res.ok) throw new Error(`Ebook search failed (HTTP ${res.status}).`);
   let data: { results?: unknown } | null = null;
   try { data = (await res.json()) as { results?: unknown }; } catch { return []; }
