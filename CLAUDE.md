@@ -14,7 +14,29 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.16** (12 Oct): a round of Android TV work done on the user's onn 4K Plus, plus
+- **Current release: 1.3.17** (13 Oct): no new feature; four robustness and speed changes found by an
+  audit, and a desktop fix. Run in a browser against a fake 120-book library; not run on Android or a TV.
+  - Player state is two contexts in `PlayerContext.tsx`: `usePlayer()` (does not change per tick) and
+    `usePlayerTick()` (the `TICK_FIELDS` of `src/player/visibility.ts`). Only what draws the position
+    may call `usePlayerTick()`; a screen that does redraws several times a second. The actions are
+    permanent wrappers that call the current render's copy. `isPlaying()` reads the state on demand.
+  - The Library is one `FlatList` of rows (`src/library-rows.ts`: `cardRows`, `finishedRows`,
+    `bookMetrics`), cards are `React.memo`. The filter is in each row's key, not on the list, so a
+    filter change leaves the header (search field, a remote's focus on a chip) alone. The Finished
+    shelf's year grouping was not opened after the change.
+  - Every read-modify-write in `storage.ts` and the Hardcover links goes through `serial` in
+    `src/write-queue.ts`. A queued function must never call another queued function (it would wait on
+    itself); split it into an unqueued inner helper. `applyRemoteProgress` skips a record older than
+    the one stored (`src/remote-progress.ts`). Not queued: the "read elsewhere" list and the pending
+    read-along jobs, whose callers load and save themselves.
+  - `fetchWithTimeout` (`src/fetch-timeout.ts`): 20 s for the JSON APIs, 30 s for the read-along
+    server, 50 s for the seeder check, 60 s for recommendations. File downloads and the audio Range
+    reads have none. Unit-tested with a fake fetch only. `submitJob` posts the whole book text under
+    the 30 s limit.
+  - Desktop: the sidebar called `findNodeHandle` on every platform and react-native-web throws there,
+    so the web export of 1.3.16 was blank in the wide layout. TV-only code that touches native handles
+    must sit behind `isTV`.
+- **1.3.16** (12 Oct): a round of Android TV work done on the user's onn 4K Plus, plus
   cleaner titles and one more synced setting. Seen working on the onn unless noted.
   - Player on a short screen (`shortPane` in `PlayerScreen.tsx`, height < 640): the two-pane player's left
     column measured its title and controls (`paneRest`) and gives the cover what is left; the transport
