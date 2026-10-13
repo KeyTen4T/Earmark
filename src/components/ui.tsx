@@ -10,8 +10,17 @@ import { useEscape } from '../escape';
 
 export type IconName = React.ComponentProps<typeof Ionicons>['name'];
 
-/** Accent ring marking the focused control on a TV; outline is drawn outside the box, so it never shifts layout. */
-export const tvFocusRing: ViewStyle = { outlineWidth: 2, outlineColor: C.accent, outlineOffset: 2, outlineStyle: 'solid' };
+/** The same mark for a control that is not a Tap (the Switch): an outline, which needs room around it. */
+export const tvFocusRing: ViewStyle = { outlineWidth: 3, outlineColor: C.text, outlineOffset: 2, outlineStyle: 'solid', borderRadius: 8 };
+
+/**
+ * Marks the focused control on a TV. It is drawn inside the control's own box: an outline around it
+ * is cut off wherever a card or a scroll view clips its children, which left the focus invisible.
+ */
+// White, not the accent: half the buttons are the accent colour and an accent ring vanishes on them.
+function TVFocusRing({ radius }: { radius?: unknown }) {
+  return <View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderWidth: 3, borderColor: C.text, borderRadius: typeof radius === 'number' ? radius : 8, backgroundColor: 'rgba(255,255,255,0.08)' }]} />;
+}
 
 /** A short buzz you can feel under your thumb: 'tick' for selections, 'bump' for something that happened. */
 export const haptic = (kind: 'tick' | 'bump' = 'tick') => { try { Vibration.vibrate(kind === 'tick' ? 8 : 18); } catch { /* no vibrator */ } };
@@ -117,29 +126,55 @@ export function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hov
   const menuProps: any = !onMenu ? null : Platform.OS === 'web'
     ? { onContextMenu: (e: any) => { e.preventDefault(); e.stopPropagation(); onMenu(); } }
     : { onLongPress: () => { haptic('bump'); onMenu(); } };
+  // A disabled control is skipped by the remote; `accessible` has to go too, or Android keeps it focusable.
+  const skip: any = isTV && rest.disabled ? { focusable: false, accessible: false } : null;
   const lit = (hovered || (isTV && focused)) && !rest.disabled;
-  const ring = isTV && focused && !rest.disabled ? tvFocusRing : null;
+  const ring = isTV && focused && !rest.disabled;
   return (
-    <Pressable {...rest} {...menuProps} accessibilityLabel={accessibilityLabel} accessibilityRole={accessibilityRole} accessibilityState={accessibilityState} style={{ flex, flexGrow, flexShrink, flexBasis, alignSelf }}
+    <Pressable {...rest} {...menuProps} {...skip} accessibilityLabel={accessibilityLabel} accessibilityRole={accessibilityRole} accessibilityState={accessibilityState} style={{ flex, flexGrow, flexShrink, flexBasis, alignSelf }}
       onPress={rest.onPress ? (e) => { if (buzz) haptic(); rest.onPress?.(e); } : undefined}
       onFocus={(e) => { if (isTV) setFocused(true); rest.onFocus?.(e); }}
       onBlur={(e) => { if (isTV) setFocused(false); rest.onBlur?.(e); }}
       onHoverIn={(e) => { if (Platform.OS === 'web') setHovered(true); rest.onHoverIn?.(e); }}
       onHoverOut={(e) => { if (Platform.OS === 'web') setHovered(false); rest.onHoverOut?.(e); }}
       onPressIn={(e) => { to(scaleTo); rest.onPressIn?.(e); }} onPressOut={(e) => { to(1); rest.onPressOut?.(e); }}>
-      <Animated.View style={[innerStyle, { transform: [{ scale: v }] }, rest.disabled ? { opacity: 0.45 } : null, lit ? hoverStyle : null, ring]}>{children}</Animated.View>
+      <Animated.View style={[innerStyle, { transform: [{ scale: v }] }, rest.disabled ? { opacity: 0.45 } : null, lit ? hoverStyle : null]}>{children}{ring ? <TVFocusRing radius={inner.borderRadius} /> : null}</Animated.View>
     </Pressable>
   );
 }
 
-/** A TextInput that shows the accent focus ring when selected with a TV remote. */
-export function Input({ style, ...props }: React.ComponentProps<typeof TextInput>) {
-  const [focused, setFocused] = React.useState(false);
+/**
+ * The app's text field. On a phone and on desktop it is a plain TextInput. On a TV it is a button
+ * showing the value until it is selected: React Native's Android text field refuses the focus a
+ * remote's D-pad offers it, so a real field in the way stops the remote dead. Selecting the button
+ * swaps in the real field, focused from JS, and leaving it swaps the button back.
+ */
+export function Input(props: React.ComponentProps<typeof TextInput>) {
+  return isTV ? <TVInput {...props} /> : <TextInput {...props} />;
+}
+
+function TVInput({ style, autoFocus, onBlur, onSubmitEditing, ...props }: React.ComponentProps<typeof TextInput>) {
+  const [editing, setEditing] = React.useState(!!autoFocus);
+  // After Done on the keyboard the field goes away while focused; the button takes the focus back.
+  const [reclaim, setReclaim] = React.useState(false);
+  const flat = (StyleSheet.flatten(style) ?? {}) as Record<string, any>;
+  if (editing) {
+    return (
+      <TextInput {...props} autoFocus style={[style, { borderWidth: 3, borderColor: C.text, borderRadius: flat.borderRadius ?? 8 }]}
+        onBlur={(e) => { setEditing(false); onBlur?.(e); }}
+        onSubmitEditing={(e) => { onSubmitEditing?.(e); if (!props.multiline) { setReclaim(true); setEditing(false); } }} />
+    );
+  }
+  const { color, fontSize, fontWeight, fontFamily, lineHeight, letterSpacing, textAlign, textAlignVertical, ...box } = flat;
+  const value = props.value ?? '';
+  const shown = value ? (props.secureTextEntry ? '•'.repeat(Math.min(value.length, 24)) : value) : props.placeholder ?? '';
+  const focusProps: any = reclaim ? { hasTVPreferredFocus: true } : null;
   return (
-    <TextInput {...props}
-      onFocus={(e) => { setFocused(true); props.onFocus?.(e); }}
-      onBlur={(e) => { setFocused(false); props.onBlur?.(e); }}
-      style={[style, isTV && focused ? tvFocusRing : null]} />
+    <Tap {...focusProps} scaleTo={1} onPress={() => setEditing(true)} onBlur={() => setReclaim(false)}
+      accessibilityLabel={props.accessibilityLabel ?? props.placeholder} accessibilityHint="Select to type"
+      style={[{ minHeight: 44, justifyContent: props.multiline ? 'flex-start' : 'center', overflow: 'hidden' }, box]}>
+      <Text numberOfLines={props.multiline ? undefined : 1} style={{ color: value ? color ?? C.text : props.placeholderTextColor ?? C.faint, fontSize, fontWeight, fontFamily, lineHeight, letterSpacing, textAlign }}>{shown}</Text>
+    </Tap>
   );
 }
 
@@ -325,7 +360,8 @@ export function Sheet({ visible, onClose, title, children }: { visible: boolean;
     <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
       <View pointerEvents={visible ? 'auto' : 'none'} style={{ flex: 1, justifyContent: wide ? 'center' : 'flex-end', alignItems: wide ? 'center' : undefined }}>
         <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', opacity: open }]}>
-          <Pressable style={{ flex: 1 }} onPress={onClose} focusable={false} />
+          {/* On Android `accessible` alone makes a view focusable; left so, the backdrop takes the remote's focus and keeps it. */}
+          <Pressable style={{ flex: 1 }} onPress={onClose} focusable={false} accessible={!isTV} />
         </Animated.View>
         <Animated.View accessibilityViewIsModal style={[{ backgroundColor: C.surface, borderTopLeftRadius: R.xl, borderTopRightRadius: R.xl, paddingBottom: (kb || insets.bottom) + 12, maxHeight: maxHeight + (kb || 0), borderTopWidth: 1, borderColor: C.line, transform: [{ translateY: slide }] },
           wide && { width: dialogWidth, borderRadius: R.xl, borderWidth: 1, paddingBottom: 20, opacity: open }]}>
