@@ -59,13 +59,14 @@ export type SyncStamps = {
   hidden: Record<string, number>;
   wishlist: Record<string, number>;
   settings: number;
+  ebookSearch: number;
   readalong: Record<string, number>;
 };
 export async function loadStamps(): Promise<SyncStamps> {
   const s = await getJSON<Partial<SyncStamps>>('sync_stamps', {});
   return {
     meta: s.meta ?? {}, hidden: s.hidden ?? {}, wishlist: s.wishlist ?? {},
-    settings: s.settings ?? 0, readalong: s.readalong ?? {},
+    settings: s.settings ?? 0, ebookSearch: s.ebookSearch ?? 0, readalong: s.readalong ?? {},
   };
 }
 export const saveStamps = (s: SyncStamps) => setJSON('sync_stamps', s);
@@ -306,10 +307,32 @@ export async function removeReadElsewhere(id: string) {
   if (!removed.includes(id)) await saveRemovedReadElsewhere([...removed, id]);
 }
 
-// ---- EPUB search address for the read-along builder (device-local; not in the sync document) ----
+// ---- EPUB search address for the read-along builder (synced like the playback settings) ----
 const EBOOK_SEARCH_URL_KEY = 'ebook_search_url';
 export const loadEbookSearchUrl = () => getJSON<string>(EBOOK_SEARCH_URL_KEY, '');
-export const saveEbookSearchUrl = (url: string) => setJSON(EBOOK_SEARCH_URL_KEY, url.trim());
+/**
+ * Saves the address. A real change (typing one, or clearing a set one by hand) is stamped now and
+ * tells sync there is a local edit; saving the same value again is not a change and is not stamped,
+ * so a device that has never set the address keeps stamp 0 and loses to anything synced.
+ */
+export async function saveEbookSearchUrl(url: string) {
+  const trimmed = url.trim();
+  const before = await loadEbookSearchUrl();
+  await setJSON(EBOOK_SEARCH_URL_KEY, trimmed);
+  if (before !== trimmed) {
+    const stamps = await loadStamps();
+    stamps.ebookSearch = Date.now();
+    await saveStamps(stamps);
+    emitLocalChange();
+  }
+}
+/** Writes an address that came from sync, stamped with the remote time and never re-stamped locally. */
+export async function applyRemoteEbookSearch(value: string, updated: number) {
+  await setJSON(EBOOK_SEARCH_URL_KEY, value);
+  const stamps = await loadStamps();
+  stamps.ebookSearch = updated;
+  await saveStamps(stamps);
+}
 
 // ---- Pending server builds, keyed by audiobook hash (device-local, not synced) ----
 export const loadPendingJobs = () => getJSON<PendingJobs>('readalong_pending', {});
@@ -347,15 +370,16 @@ export async function migrateRemoteBuiltins(): Promise<ScraperDef[]> {
 }
 
 // ---- Misc settings ----
-export type Settings = { rate: number; skipBack: number; skipForward: number; lastBookId?: number };
-const DEFAULT_SETTINGS: Settings = { rate: 1, skipBack: 15, skipForward: 30 };
+// seekStep: seconds the seek bar moves per Left/Right press of a TV remote. Device-local, like lastBookId.
+export type Settings = { rate: number; skipBack: number; skipForward: number; seekStep: number; lastBookId?: number };
+const DEFAULT_SETTINGS: Settings = { rate: 1, skipBack: 15, skipForward: 30, seekStep: 5 };
 export const loadSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await getJSON<Partial<Settings>>('settings', {})) });
 const sameSettings = (a: Settings, b: Settings) => a.rate === b.rate && a.skipBack === b.skipBack && a.skipForward === b.skipForward;
 export async function saveSettings(patch: Partial<Settings>) {
   const before = await loadSettings();
   const after = { ...before, ...patch };
   await setJSON('settings', after);
-  // lastBookId is device-local: only the synced playback settings count as a real change.
+  // lastBookId and seekStep are device-local: only the synced playback settings count as a real change.
   if (!sameSettings(before, after)) {
     const stamps = await loadStamps();
     stamps.settings = Date.now();

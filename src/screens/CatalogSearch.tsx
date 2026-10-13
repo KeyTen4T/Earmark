@@ -14,7 +14,7 @@ import { loadWishlist, saveWishlist, getAiKey } from '../storage';
 import { onSyncApplied } from '../sync';
 import { HistoryItem, recommend } from '../recommend';
 import { usePlayer } from '../player/PlayerContext';
-import { useLayout } from '../layout';
+import { useLayout, isTV } from '../layout';
 
 /**
  * Looks audiobooks up in a general catalogue, whether or not any source has them.
@@ -24,6 +24,9 @@ const SAVED = 'saved'; // the shelf that isn't a genre
 const HERO_COUNT = 10; // chart positions shown as the big cover row
 const HERO_SIZE = 164;
 const HERO_STEP = HERO_SIZE + 14; // one cover plus the gap after it
+const HERO_GAP = 18; // the gap on the wide chart row
+const HERO_TV_TARGET = 112; // makes the TV fit about five covers per row
+const CARD_PAD = 4; // inner padding that keeps the TV focus ring off the card's text
 export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history, goSettings }: {
   modeToggle: React.ReactNode; bottomPad: number; onFindInSources: (query: string) => void;
   history: HistoryItem[]; goSettings: () => void;
@@ -46,6 +49,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
   const run = useRef(0);
   const { y, onScroll } = useScrollY();
   const heroX = useRef(new Animated.Value(0)).current;
+  const [rowW, setRowW] = useState(0); // the wide chart row's measured width, for the TV's cover size
   const [shelf, setShelf] = useState(''); // a genre id ('' = overall chart) or SAVED
   const [chart, setChart] = useState<CatalogBook[]>([]);
   const [chartBusy, setChartBusy] = useState(false);
@@ -177,7 +181,7 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
   // The top ten: a snapping, swipeable row on a phone; a plain grid on desktop, where there's no swiping.
   const HeroRow: React.ComponentType<any> = wide ? View : Animated.ScrollView;
   const heroRowProps = wide
-    ? { style: { paddingHorizontal: 20, gap: 18, flexDirection: 'row', flexWrap: 'wrap' } }
+    ? { style: { paddingHorizontal: 20, gap: HERO_GAP, flexDirection: 'row', flexWrap: 'wrap' }, onLayout: (e: any) => setRowW(e.nativeEvent.layout.width) }
     : {
       horizontal: true, showsHorizontalScrollIndicator: false, contentContainerStyle: { paddingHorizontal: 20, gap: 14 },
       snapToInterval: HERO_STEP, decelerationRate: 'fast', scrollEventThrottle: 16,
@@ -189,6 +193,13 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
   const showingFullCast = browsing && shelf === FULL_CAST;
   const showingChart = browsing && !showingWishlist && !showingFullCast;
   const genre = GENRES.find((g) => g.id === shelf);
+  const surpriseLabel = shelf === FULL_CAST ? 'Surprise me · Full cast' : shelf && shelf !== SAVED ? `Surprise me · ${genre?.name}` : 'Surprise me';
+  // On a TV the chart covers fill the width (~5 per row) rather than keeping the phone's fixed size.
+  // Measure the row as the Library grid does, instead of trusting contentWidth, and let the card's
+  // inner padding (the ring fix) come out of the cover.
+  const heroAvail = Math.max(1, (rowW || contentWidth) - 40);
+  const heroCols = Math.max(2, Math.floor((heroAvail + HERO_GAP) / (HERO_TV_TARGET + HERO_GAP)));
+  const heroSize = isTV ? Math.floor((heroAvail - HERO_GAP * (heroCols - 1)) / heroCols) : HERO_SIZE;
   // The chart's first ten are the big cover row in the header; the list carries on from 11. The full
   // cast shelf is not a chart, so it is shown whole, without ranks.
   const data = showingChart ? chart.slice(HERO_COUNT) : showingFullCast ? chart : showingWishlist ? wishlist : results;
@@ -214,11 +225,13 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
           <Chip label={wishlist.length ? `Want to listen · ${wishlist.length}` : 'Want to listen'} active={shelf === SAVED} onPress={() => setShelf(SAVED)} />
           <Chip label="Full cast" active={shelf === FULL_CAST} onPress={() => setShelf(FULL_CAST)} />
           {GENRES.slice(1).map((g) => <Chip key={g.id} label={g.name} active={shelf === g.id} onPress={() => setShelf(g.id)} />)}
+          {/* On a TV "Surprise me" rides at the end of the single chip row, not on a line of its own. */}
+          {isTV ? <Chip icon="dice-outline" label={surpriseLabel} onPress={surprise} disabled={surprising} loading={surprising} /> : null}
         </ChipRow>
       ) : null}
-      {browsing ? (
+      {browsing && !isTV ? (
         <View style={{ paddingHorizontal: 20, marginTop: 14, maxWidth: 360 }}>
-          <Button icon="dice-outline" label={shelf === FULL_CAST ? 'Surprise me · Full cast' : shelf && shelf !== SAVED ? `Surprise me · ${genre?.name}` : 'Surprise me'} onPress={surprise} loading={surprising} />
+          <Button icon="dice-outline" label={surpriseLabel} onPress={surprise} loading={surprising} />
         </View>
       ) : null}
       {showingChart && chart.length ? (
@@ -235,10 +248,10 @@ export function CatalogSearch({ modeToggle, bottomPad, onFindInSources, history,
               const dim = wide ? 1 : heroX.interpolate({ inputRange: at, outputRange: [0.7, 1, 0.7], extrapolate: 'clamp' });
               return (
               <FadeIn key={b.id} index={i} y={24}>
-              <Animated.View style={{ width: HERO_SIZE, opacity: dim, transform: [{ scale }] }}>
-              <Tap onPress={() => openDetail(b)} scaleTo={0.97} hoverStyle={{ backgroundColor: C.hover, borderRadius: R.md }}>
+              <Animated.View style={{ width: heroSize, opacity: dim, transform: [{ scale }] }}>
+              <Tap onPress={() => openDetail(b)} scaleTo={0.97} hoverStyle={{ backgroundColor: C.hover, borderRadius: R.md }} style={isTV ? { padding: CARD_PAD } : undefined}>
                 <View>
-                  <Cover title={b.title} uri={b.cover} size={HERO_SIZE} radius={R.md} />
+                  <Cover title={b.title} uri={b.cover} size={isTV ? heroSize - CARD_PAD * 2 : HERO_SIZE} radius={R.md} />
                   <View style={{ position: 'absolute', left: 8, bottom: 8, minWidth: 30, height: 30, paddingHorizontal: 8, borderRadius: 15, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center' }}>
                     <Text style={{ color: C.accentInk, fontWeight: '800', fontSize: 14 }}>{i + 1}</Text>
                   </View>

@@ -200,3 +200,65 @@ test('meta: a newer rating wins the merge, and clearing it survives', () => {
   assert.equal(mergeDocs(b, cleared).meta.h.value?.rating, undefined);
   assert.equal(mergeDocs(b, cleared).meta.h.value?.finishedAt, undefined);
 });
+
+// ---- ebookSearch: the read-along EPUB search address ----
+const EBOOK = 'https://example.test/search?q={query}';
+const EBOOK_A = 'https://a.example.test/search?q={query}';
+/** A document as an older version wrote it: without the ebookSearch key at all. */
+const oldDoc = (): Doc => { const d = emptyDoc() as any; delete d.ebookSearch; return d; };
+
+test('ebookSearch: newest wins in both directions', () => {
+  const a = mk({ ebookSearch: { value: EBOOK_A, updated: 100 } });
+  const b = mk({ ebookSearch: { value: EBOOK, updated: 200 } });
+  assert.equal(mergeDocs(a, b).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(b, a).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(a, b).ebookSearch.updated, 200);
+});
+
+test('ebookSearch: a never-set device adopts the synced value', () => {
+  // The default record is a device that has never set the address: stamp 0, so it loses.
+  const fresh = mk({ ebookSearch: { value: '', updated: 0 } });
+  const synced = mk({ ebookSearch: { value: EBOOK, updated: 100 } });
+  assert.equal(mergeDocs(fresh, synced).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(synced, fresh).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(fresh, synced).ebookSearch.updated, 100);
+});
+
+test('ebookSearch: an old-format document without the key merges cleanly', () => {
+  const old = parseDoc(oldDoc());
+  assert.deepEqual(old.ebookSearch, { value: '', updated: 0 });
+  // A device with a real address keeps it when the other side simply has no such key.
+  const local = mk({ ebookSearch: { value: EBOOK, updated: 100 } });
+  assert.equal(mergeDocs(local, old).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(old, local).ebookSearch.value, EBOOK);
+  // Two never-set documents stay schematically correct and gain nothing.
+  assert.deepEqual(mergeDocs(parseDoc(oldDoc()), parseDoc(oldDoc())).ebookSearch, { value: '', updated: 0 });
+});
+
+test('ebookSearch: a document with the key survives a merge with one from an old version', () => {
+  // A new-version document is written to a gist an old version also reads; that old version parses
+  // it without the key and writes its own, so the merge sees the key on one side only.
+  const withKey = parseDoc({ ...emptyDoc(), ebookSearch: { value: EBOOK, updated: 42 } });
+  const withoutKey = parseDoc(oldDoc());
+  assert.equal(mergeDocs(withKey, withoutKey).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(withoutKey, withKey).ebookSearch.value, EBOOK);
+  assert.equal(mergeDocs(withKey, withoutKey).ebookSearch.updated, 42);
+});
+
+test('ebookSearch: deliberate clearing propagates', () => {
+  const set = mk({ ebookSearch: { value: EBOOK, updated: 10 } });
+  const cleared = mk({ ebookSearch: { value: '', updated: 20 } });
+  assert.equal(mergeDocs(set, cleared).ebookSearch.value, '');
+  assert.equal(mergeDocs(cleared, set).ebookSearch.value, '');
+  assert.equal(mergeDocs(set, cleared).ebookSearch.updated, 20);
+  // An older clear loses to a newer value, and clearing only applies once it is a stamped change.
+  const newer = mk({ ebookSearch: { value: EBOOK_A, updated: 30 } });
+  assert.equal(mergeDocs(cleared, newer).ebookSearch.value, EBOOK_A);
+});
+
+test('ebookSearch: parse keeps a string, drops junk and a missing key stays never-set', () => {
+  const kept = parseDoc({ ...emptyDoc(), ebookSearch: { value: EBOOK, updated: 7 } });
+  assert.deepEqual(kept.ebookSearch, { value: EBOOK, updated: 7 });
+  assert.deepEqual(parseDoc({ ...emptyDoc(), ebookSearch: { value: 5, updated: 7 } }).ebookSearch, { value: '', updated: 0 });
+  assert.deepEqual(parseDoc({ ...emptyDoc(), ebookSearch: 'nope' }).ebookSearch, { value: '', updated: 0 });
+});

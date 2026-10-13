@@ -14,7 +14,33 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.15** (12 Oct): Android TV made usable with a remote, after trying 1.3.14 on
+- **Current release: 1.3.16** (12 Oct): a round of Android TV work done on the user's onn 4K Plus, plus
+  cleaner titles and one more synced setting. Seen working on the onn unless noted.
+  - Player on a short screen (`shortPane` in `PlayerScreen.tsx`, height < 640): the two-pane player's left
+    column measured its title and controls (`paneRest`) and gives the cover what is left; the transport
+    goes compact and the chapter-name line is dropped. Before, the transport and pills were off-screen.
+  - Seek bar with a remote (`TVScrubber` in `Scrubber.tsx`). RN passes no arrow keys to JS inside a Modal
+    and `view.focus()` is a no-op (`enableImperativeFocus` is off), so three stacked focus targets are
+    linked in a ring with `nextFocusLeft/Right`; the direction the focus moved is the key pressed. Step is
+    `seekStep` (Settings → Playback → Seek bar step, TV only, default 5 s, device-local). Tried with adb
+    key events, not a held button on a physical remote.
+  - Sidebar items are chained with `nextFocusUp/Down` (`Tap`/`Button` are now `forwardRef`). Left from the
+    content still lands on the nearest sidebar item; it cannot be redirected without imperative focus.
+  - Library on TV: covers about 132 wide (112 with the player bar), no `StickyBar`; the grid card has a
+    4 px inset so the focus ring does not cover its text. Discover on TV: one scrolling chip row with
+    "Surprise me" at its end, and the chart grid fills the width. `PlayerBar` is 64 tall on TV.
+  - Titles: `src/titles.ts` (`prettyName`, `audioTags`; tests in `test/titles.test.ts`) strips codec,
+    channel and encode tags and shows them as badges (`AudioBadges`). The badge reads the torrent name; it
+    is not the decoded channel count. Chapter names are not cleaned.
+  - `Cover` shows its title placeholder until the image has loaded; not seen on a slow load.
+  - The EPUB search address syncs as a new top-level `ebookSearch` key (older versions carry unknown
+    top-level keys through). Unit-tested only; not seen crossing between two devices.
+  - Surround: on the user's Shield a 5.1 Opus book is decoded to six channels but the HDMI sink refuses
+    multichannel PCM (`nvaudio_hw: Sink does not support multichannel`), so Android downmixes to stereo.
+    Not an app fault; an in-app Dolby Digital encode would be the fix and is not built.
+  - Seen once and not reproduced: a book restarted from 0:00 after an `adb install -r` over a running
+    player. Two deliberate force-stop tests afterwards resumed correctly.
+- **1.3.15** (12 Oct): Android TV made usable with a remote, after trying 1.3.14 on
   the user's onn 4K Plus (driven over adb: `adb connect` to its address, `input keyevent DPAD_*`,
   `uiautomator dump` to see which node is focused).
   - On Android `accessible` alone makes a view focusable (`ReactViewManager.setAccessible`), so a view

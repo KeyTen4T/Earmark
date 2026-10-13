@@ -35,6 +35,14 @@ export type CatalogBook = {
 
 export type SettingsFields = { rate: number; skipBack: number; skipForward: number };
 
+/**
+ * The read-along builder's EPUB search address, a single stamped string. `''` is a real value (the
+ * user cleared it), distinct from "never set", which carries stamp 0 and so loses to anything real.
+ * It is a top-level key on purpose: older versions normalise `settings` to exactly its three fields
+ * and would drop a field hidden inside it, but they carry unknown top-level keys through untouched.
+ */
+export type EbookSearch = { value: string; updated: number };
+
 /** One synced record. `value: null` is a tombstone: the record was deleted on some device. */
 export type Stamped<T> = { value: T | null; updated: number };
 
@@ -45,6 +53,7 @@ export type SyncDoc = {
   hidden: Record<string, Stamped<boolean>>;
   wishlist: Record<string, Stamped<CatalogBook>>;
   settings: Stamped<SettingsFields>;
+  ebookSearch: EbookSearch;
   readalong: Record<string, Stamped<ReadalongRecord>>;
   [key: string]: unknown;
 };
@@ -52,7 +61,7 @@ export type SyncDoc = {
 export function emptyDoc(): SyncDoc {
   return {
     v: SYNC_VERSION, progress: {}, meta: {}, hidden: {}, wishlist: {},
-    settings: { value: null, updated: 0 }, readalong: {},
+    settings: { value: null, updated: 0 }, ebookSearch: { value: '', updated: 0 }, readalong: {},
   };
 }
 
@@ -166,6 +175,11 @@ export function parseDoc(raw: unknown): SyncDoc {
       updated: num(raw.settings.updated),
     };
   }
+  // A missing or malformed key (an older document, or junk) keeps the never-set default: value '' and
+  // stamp 0, which loses to any real value.
+  if (isObj(raw.ebookSearch) && typeof raw.ebookSearch.value === 'string') {
+    doc.ebookSearch = { value: raw.ebookSearch.value, updated: num(raw.ebookSearch.updated) };
+  }
   if (isObj(raw.readalong)) {
     for (const [key, val] of Object.entries(raw.readalong)) {
       if (!isObj(val)) continue;
@@ -183,6 +197,12 @@ export function parseDoc(raw: unknown): SyncDoc {
 function newerStamped<T>(a: Stamped<T>, b: Stamped<T>): Stamped<T> {
   if (a.updated !== b.updated) return a.updated > b.updated ? a : b;
   // Equal times: pick deterministically so the merge is commutative regardless of argument order.
+  return stableStringify(a) >= stableStringify(b) ? a : b;
+}
+
+/** Like newerStamped, but the value is always a string (no tombstone: clearing is `''`). */
+function newerEbookSearch(a: EbookSearch, b: EbookSearch): EbookSearch {
+  if (a.updated !== b.updated) return a.updated > b.updated ? a : b;
   return stableStringify(a) >= stableStringify(b) ? a : b;
 }
 
@@ -204,7 +224,7 @@ function mergeProgress(a: Record<string, ProgressRecord>, b: Record<string, Prog
   return out;
 }
 
-const KNOWN = new Set(['v', 'progress', 'meta', 'hidden', 'wishlist', 'settings', 'readalong']);
+const KNOWN = new Set(['v', 'progress', 'meta', 'hidden', 'wishlist', 'settings', 'ebookSearch', 'readalong']);
 
 /** Per-record last-write-wins merge. Idempotent and commutative. */
 export function mergeDocs(a: SyncDoc, b: SyncDoc): SyncDoc {
@@ -215,6 +235,7 @@ export function mergeDocs(a: SyncDoc, b: SyncDoc): SyncDoc {
   out.hidden = mergeStamped(a.hidden, b.hidden);
   out.wishlist = mergeStamped(a.wishlist, b.wishlist);
   out.settings = newerStamped(a.settings, b.settings);
+  out.ebookSearch = newerEbookSearch(a.ebookSearch, b.ebookSearch);
   out.readalong = mergeStamped(a.readalong, b.readalong);
 
   // Unknown top-level keys (a future version may add some) are preserved with a deterministic pick.

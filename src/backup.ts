@@ -246,11 +246,15 @@ export function mergeSetupData(device: SetupData, file: SetupData): SetupData {
 export function mergeBackupData(device: BackupData, file: BackupData): BackupData {
   const have = new Set(device.sources.map((s) => s.id));
   const readElsewhereIds = new Set(device.readElsewhere.map((e) => e.id));
+  const sync = mergeDocs(device.sync, file.sync);
   return {
-    sync: mergeDocs(device.sync, file.sync),
+    sync,
     sources: [...device.sources, ...file.sources.filter((s) => !have.has(s.id))],
     disabled: [...new Set([...device.disabled, ...file.disabled])],
-    ebookSearchUrl: device.ebookSearchUrl || file.ebookSearchUrl,
+    // The address now lives in the sync document too; when the merged record is stamped, it decides.
+    // An older backup only carries it in this top-level field, so fall back to that when the sync
+    // record is unstamped (stamp 0).
+    ebookSearchUrl: sync.ebookSearch.updated > 0 ? sync.ebookSearch.value : device.ebookSearchUrl || file.ebookSearchUrl,
     readalongServerUrl: device.readalongServerUrl || file.readalongServerUrl,
     hardcoverLinks: { ...file.hardcoverLinks, ...device.hardcoverLinks },
     narrators: unionNarrators(device.narrators, file.narrators),
@@ -287,5 +291,6 @@ export function replaceDoc(device: SyncDoc, file: SyncDoc, now: number): SyncDoc
   out.wishlist = stamp(device.wishlist, file.wishlist);
   out.readalong = stamp(device.readalong, file.readalong);
   out.settings = { value: file.settings.value, updated: now };
+  out.ebookSearch = { value: file.ebookSearch.value, updated: now };
   return out;
 }

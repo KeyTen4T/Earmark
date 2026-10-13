@@ -48,6 +48,8 @@ type PlayerState = {
   sleep: SleepMode;
   skipBack: number;
   skipForward: number;
+  /** Seconds the seek bar moves per Left/Right press of a TV remote. */
+  seekStep: number;
 };
 
 type PlayerApi = PlayerState & {
@@ -63,6 +65,7 @@ type PlayerApi = PlayerState & {
   setRate: (r: number) => void;
   setSleep: (m: 'off' | 'chapter' | number) => void;
   setSkips: (back: number, forward: number) => void;
+  setSeekStep: (seconds: number) => void;
   stop: () => void;
   /** Refreshes the now-playing book's metadata (e.g. a new cover); ignored if another book is playing. */
   updateMeta: (bookId: number, m: BookMeta) => void;
@@ -92,7 +95,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     book: null, meta: {}, chapters: [], embedded: null, index: 0, position: 0, positionAt: 0, seekPending: false,
     seekBase: null,
     duration: 0, playing: false, loading: false,
-    recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30,
+    recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30, seekStep: 5,
   });
   const st = useRef(s);
   // Whether React is currently drawing. While the app is backgrounded the refs keep advancing but
@@ -233,7 +236,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
 
   useEffect(() => {
     setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' } as any).catch(() => {});
-    loadSettings().then((x) => patch({ rate: x.rate, skipBack: x.skipBack, skipForward: x.skipForward }));
+    loadSettings().then((x) => patch({ rate: x.rate, skipBack: x.skipBack, skipForward: x.skipForward, seekStep: x.seekStep }));
     const check = setInterval(checkNow, CHECK_INTERVAL_MS);
     return () => {
       // Pause before letting go: a released player can keep sounding in the background with nothing left to control it.
@@ -698,6 +701,11 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     saveSettings({ skipBack: back, skipForward: forward });
   };
 
+  const setSeekStep = (seconds: number) => {
+    patch({ seekStep: seconds });
+    saveSettings({ seekStep: seconds });
+  };
+
   const stop = () => {
     wantPlaying.current = false;
     localChapter.current = false;
@@ -718,7 +726,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const embedded = s.embedded;
     const embeddedIndex = embedded ? chapterAt(embedded, s.position) : -1;
     return {
-      ...s, open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep, setSkips, stop, updateMeta,
+      ...s, open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep, setSkips, setSeekStep, stop, updateMeta,
       displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
       chapterName: embedded
         ? embedded[embeddedIndex]?.title ?? ''

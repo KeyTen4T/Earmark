@@ -51,15 +51,8 @@ export function fmtApprox(s: number) {
   return `${m} m`;
 }
 
-/** Strip release-style noise from torrent names for display. */
-export function prettyName(name: string) {
-  return name
-    .replace(/\.(m4b|mp3|zip|rar)$/i, '')
-    .replace(/[._]+/g, ' ')
-    .replace(/\s*[\[(](?:mp3|m4b|aac|\d{2,3}\s?kbps|unabridged|audiobook|\d{3,4}p)[^\])]*[\])]/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
+// The title/format logic is pure so it runs under the Node test runner; see src/titles.ts.
+export { prettyName, audioTags } from './titles';
 
 /** Percentage string typed for React Native's DimensionValue. */
 export const pct = (fraction: number) => `${Math.max(0, Math.min(1, fraction || 0)) * 100}%` as `${number}%`;

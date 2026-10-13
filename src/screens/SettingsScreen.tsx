@@ -27,7 +27,7 @@ import { isHttpUrl } from '../readalong/ebookSearch';
 import { fetchMe, setHcToken, getHcToken, cachedMe, fetchHardcoverHistory, HcUser } from '../hardcover';
 import { pickGoodreadsExport, applyReadingPlan } from '../reading-import';
 import { planReadingImport, type ImportPlan, type LibraryBook, type ReadElsewhere } from '../reading-history';
-import { getSyncStatus, subscribeSyncStatus, connectSync, disconnectSync, syncNow, type SyncStatus } from '../sync';
+import { getSyncStatus, subscribeSyncStatus, onSyncApplied, connectSync, disconnectSync, syncNow, type SyncStatus } from '../sync';
 import { getDownloads, subscribeDownloads, totalBytesUsed, removeAllDownloads } from '../downloads';
 import { formatBytes } from '../scrapers/template';
 import type { Downloads } from '../downloads/state';
@@ -89,6 +89,8 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
     loadEbookSearchUrl().then(setEbookUrl, () => setEbookUrl(''));
   }, []);
   useEffect(() => { reloadEbookUrl(); }, [reloadEbookUrl]);
+  // A sync can bring the address from another device; refresh the row without a restart.
+  useEffect(() => onSyncApplied(reloadEbookUrl), [reloadEbookUrl]);
 
   useEffect(() => { getHcToken().then((t) => (t ? cachedMe().then(setHcUser) : null)); }, []);
 
@@ -370,6 +372,15 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
             <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
               {[10, 15, 30, 45, 60].map((n) => <Chip key={n} label={`${n}s`} active={player.skipForward === n} onPress={() => player.setSkips(player.skipBack, n)} />)}
             </View>
+            {isTV ? (
+              <>
+                <Text style={[T.body, { marginTop: 6 }]}>Seek bar step</Text>
+                <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                  {[5, 10, 15, 30, 60].map((n) => <Chip key={n} label={`${n}s`} active={player.seekStep === n} onPress={() => player.setSeekStep(n)} />)}
+                </View>
+                <Text style={T.small}>How far Left and Right move the seek bar in the player.</Text>
+              </>
+            ) : null}
           </View>
         </Section>
 

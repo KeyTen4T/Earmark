@@ -3,7 +3,7 @@ import { Animated, Easing, PanResponder, Platform, ScrollView, Pressable, Pressa
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { C, R, T, paletteFor, prettyName, pct } from '../theme';
+import { C, R, T, paletteFor, prettyName, audioTags, pct } from '../theme';
 import { shouldAnimateProgress } from '../player/visibility';
 import { isTV, useLayout } from '../layout';
 import { useEscape } from '../escape';
@@ -95,21 +95,27 @@ export function StickyBar({ y, title }: { y: Animated.Value; title: string }) {
   const insets = useSafeAreaInsets();
   const show = y.interpolate({ inputRange: [50, 100], outputRange: [0, 1], extrapolate: 'clamp' });
   const drop = y.interpolate({ inputRange: [50, 100], outputRange: [-8, 0], extrapolate: 'clamp' });
+  // Not on a TV: the remote scrolls by moving the focus, which parks the selected row under this bar,
+  // and the sidebar already says which screen this is.
+  if (isTV) return null;
   return (
     <Animated.View pointerEvents="none" style={{
       position: 'absolute', left: 0, right: 0, top: 0, height: insets.top + 46, paddingTop: insets.top, opacity: show,
-      backgroundColor: 'rgba(10,10,15,0.96)', borderBottomWidth: 1, borderBottomColor: C.line, alignItems: 'center', justifyContent: 'center',
+      backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line, alignItems: 'center', justifyContent: 'center',
     }}>
       <Animated.Text style={{ color: C.text, fontWeight: '700', fontSize: 16, transform: [{ translateY: drop }] }}>{title}</Animated.Text>
     </Animated.View>
   );
 }
 
+export type TapProps = Omit<PressableProps, 'style' | 'children'> & { style?: StyleProp<ViewStyle>; scaleTo?: number; haptic?: boolean; onMenu?: () => void; hoverStyle?: StyleProp<ViewStyle>; children?: React.ReactNode };
+
 /**
  * Pressable that gently scales down while held. `haptic` adds a tick when pressed.
  * `onMenu` opens the item's options: a long press on a phone, a right-click on desktop.
+ * `ref` reaches the focusable native view, so a TV screen can link controls with nextFocus*.
  */
-export function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hoverStyle, accessibilityLabel, accessibilityRole = 'button', accessibilityState, ...rest }: Omit<PressableProps, 'style' | 'children'> & { style?: StyleProp<ViewStyle>; scaleTo?: number; haptic?: boolean; onMenu?: () => void; hoverStyle?: StyleProp<ViewStyle>; children?: React.ReactNode }) {
+export const Tap = React.forwardRef<View, TapProps>(function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hoverStyle, accessibilityLabel, accessibilityRole = 'button', accessibilityState, ...rest }, ref) {
   const v = useRef(new Animated.Value(1)).current;
   // Hover is a desktop nicety only: on a touch screen these never fire, so the mobile look is untouched.
   const [hovered, setHovered] = React.useState(false);
@@ -131,7 +137,7 @@ export function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hov
   const lit = (hovered || (isTV && focused)) && !rest.disabled;
   const ring = isTV && focused && !rest.disabled;
   return (
-    <Pressable {...rest} {...menuProps} {...skip} accessibilityLabel={accessibilityLabel} accessibilityRole={accessibilityRole} accessibilityState={accessibilityState} style={{ flex, flexGrow, flexShrink, flexBasis, alignSelf }}
+    <Pressable ref={ref} {...rest} {...menuProps} {...skip} accessibilityLabel={accessibilityLabel} accessibilityRole={accessibilityRole} accessibilityState={accessibilityState} style={{ flex, flexGrow, flexShrink, flexBasis, alignSelf }}
       onPress={rest.onPress ? (e) => { if (buzz) haptic(); rest.onPress?.(e); } : undefined}
       onFocus={(e) => { if (isTV) setFocused(true); rest.onFocus?.(e); }}
       onBlur={(e) => { if (isTV) setFocused(false); rest.onBlur?.(e); }}
@@ -141,7 +147,7 @@ export function Tap({ style, children, scaleTo = 0.96, haptic: buzz, onMenu, hov
       <Animated.View style={[innerStyle, { transform: [{ scale: v }] }, rest.disabled ? { opacity: 0.45 } : null, lit ? hoverStyle : null]}>{children}{ring ? <TVFocusRing radius={inner.borderRadius} /> : null}</Animated.View>
     </Pressable>
   );
-}
+});
 
 /**
  * The app's text field. On a phone and on desktop it is a plain TextInput. On a TV it is a button
@@ -183,13 +189,17 @@ export function Cover({ title, uri, size, radius = R.md, style, accessible = fal
   const clean = prettyName(title);
   const initials = clean.split(/\s+/).filter((w) => /^[a-z0-9]/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   const [failed, setFailed] = React.useState(false);
+  // The placeholder stays up while the image loads and until the fade-in finishes, then it is dropped
+  // so a transparent PNG cannot show it through. Reset whenever the uri changes.
+  const [coverReady, setCoverReady] = React.useState(false);
   const fade = useRef(new Animated.Value(0)).current;
-  React.useEffect(() => { setFailed(false); fade.setValue(0); }, [uri]);
+  React.useEffect(() => { setFailed(false); setCoverReady(false); fade.setValue(0); }, [uri]);
+  const showPlaceholder = !uri || failed || !coverReady;
   return (
     <View accessible={accessible} accessibilityElementsHidden={!accessible} importantForAccessibility={accessible ? 'auto' : 'no-hide-descendants'}
       style={[{ width: size, height: size, borderRadius: radius, overflow: 'hidden', backgroundColor: C.elevated }, style]}>
       <LinearGradient colors={[a, b]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
-      {(!uri || failed) && (
+      {showPlaceholder && (
         <View style={[StyleSheet.absoluteFill, { padding: size * 0.1, justifyContent: 'space-between' }]}>
           <Ionicons name="headset" size={Math.max(12, size * 0.14)} color="rgba(255,255,255,0.55)" />
           {size >= 90 ? (
@@ -201,7 +211,7 @@ export function Cover({ title, uri, size, radius = R.md, style, accessible = fal
       )}
       {!!uri && !failed && (
         <Animated.Image source={{ uri }} style={[StyleSheet.absoluteFill, { opacity: fade }]} resizeMode="cover" onError={() => setFailed(true)}
-          onLoad={() => Animated.timing(fade, { toValue: 1, duration: 280, useNativeDriver: true }).start()} />
+          onLoad={() => Animated.timing(fade, { toValue: 1, duration: 280, useNativeDriver: true }).start(({ finished }) => { if (finished) setCoverReady(true); })} />
       )}
     </View>
   );
@@ -228,9 +238,9 @@ export function Bar({ value, height = 4, color = C.accent, track = 'rgba(255,255
   );
 }
 
-export function Button({ label, icon, onPress, kind = 'primary', loading, disabled, style }: {
+export const Button = React.forwardRef<View, {
   label: string; icon?: IconName; onPress?: () => void; kind?: 'primary' | 'ghost' | 'danger'; loading?: boolean; disabled?: boolean; style?: StyleProp<ViewStyle>;
-}) {
+}>(function Button({ label, icon, onPress, kind = 'primary', loading, disabled, style, ...rest }, ref) {
   const primary = kind === 'primary';
   const fg = primary ? C.accentInk : kind === 'danger' ? C.danger : C.text;
   const inner = (
@@ -239,12 +249,13 @@ export function Button({ label, icon, onPress, kind = 'primary', loading, disabl
       <Text style={{ color: fg, fontWeight: '700', fontSize: 15 }}>{label}</Text>
     </View>
   );
+  // `rest` is for Android focus props (nextFocus*) a TV screen links the button with; nothing else uses it.
   return (
-    <Tap accessibilityLabel={label} accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }} onPress={onPress} haptic disabled={disabled || loading} hoverStyle={{ opacity: 0.9 }} style={[{ borderRadius: R.pill, overflow: 'hidden' }, !primary && { backgroundColor: C.elevated, borderWidth: 1, borderColor: C.line }, style]}>
+    <Tap ref={ref} {...rest} accessibilityLabel={label} accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }} onPress={onPress} haptic disabled={disabled || loading} hoverStyle={{ opacity: 0.9 }} style={[{ borderRadius: R.pill, overflow: 'hidden' }, !primary && { backgroundColor: C.elevated, borderWidth: 1, borderColor: C.line }, style]}>
       {primary ? <LinearGradient colors={[C.accent, C.accentDeep]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>{inner}</LinearGradient> : inner}
     </Tap>
   );
-}
+});
 
 export function IconButton({ name, label, onPress, size = 22, color = C.text, bg, style, disabled }: {
   name: IconName; label: string; onPress?: () => void; size?: number; color?: string; bg?: string; style?: StyleProp<ViewStyle>; disabled?: boolean;
@@ -267,16 +278,22 @@ export function SkipIcon({ dir, seconds, size = 34, color = C.text }: { dir: 'ba
   return <Ionicons name={dir === 'back' ? 'play-back' : 'play-forward'} size={size - 4} color={color} />;
 }
 
-export function Chip({ label, active, onPress, icon, accessibilityLabel }: { label: string; active?: boolean; onPress?: () => void; icon?: IconName; accessibilityLabel?: string }) {
+export function Chip({ label, active, onPress, icon, accessibilityLabel, disabled, loading }: { label: string; active?: boolean; onPress?: () => void; icon?: IconName; accessibilityLabel?: string; disabled?: boolean; loading?: boolean }) {
   const pop = usePop(!!active, 0.88);
+  // A remote has no hover: on a TV the focused chip gets a light fill and white text as well as the
+  // ring, so it stands out on both the accent-filled active chips and the plain inactive ones.
+  const [focused, setFocused] = React.useState(false);
+  const lit = isTV && focused && !disabled;
+  const fg = lit ? C.text : active ? C.accentInk : C.sub;
   return (
     <Animated.View style={{ transform: [{ scale: pop }] }}>
-      <Tap accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected: !!active }} onPress={onPress} haptic hitSlop={5} style={{
+      <Tap disabled={disabled} accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected: !!active, disabled: !!disabled }} onPress={onPress} haptic hitSlop={5}
+        onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} style={{
         paddingHorizontal: 14, height: 34, borderRadius: R.pill, flexDirection: 'row', alignItems: 'center', gap: 6,
-        backgroundColor: active ? C.accent : C.elevated, borderWidth: 1, borderColor: active ? C.accent : C.line,
+        backgroundColor: lit ? 'rgba(255,255,255,0.18)' : active ? C.accent : C.elevated, borderWidth: 1, borderColor: active ? C.accent : C.line,
       }}>
-        {icon ? <Ionicons name={icon} size={13} color={active ? C.accentInk : C.sub} /> : null}
-        <Text numberOfLines={1} style={{ color: active ? C.accentInk : C.sub, fontWeight: '700', fontSize: 13, maxWidth: 200 }}>{label}</Text>
+        {loading ? <ActivityIndicator size="small" color={fg} /> : icon ? <Ionicons name={icon} size={13} color={fg} /> : null}
+        <Text numberOfLines={1} style={{ color: fg, fontWeight: '700', fontSize: 13, maxWidth: 200 }}>{label}</Text>
       </Tap>
     </Animated.View>
   );
@@ -292,9 +309,39 @@ export function FullCastChip() {
   );
 }
 
+/**
+ * The torrent's audio format, as at most two small pills. Plain, non-interactive views: on Android a
+ * view with `accessible` becomes focusable, and a badge must never take the remote's focus. Derived
+ * from the torrent name even when a saved title exists, because that title carries no format info.
+ */
+export function AudioBadges({ name, style }: { name: string; style?: StyleProp<ViewStyle> }) {
+  const tags = audioTags(name).slice(0, 2);
+  if (!tags.length) return null;
+  return (
+    <View focusable={false} accessible={false} style={[{ flexDirection: 'row', gap: 4, alignItems: 'center' }, style]}>
+      {tags.map((t) => (
+        <View key={t} focusable={false} accessible={false} style={{ backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: C.line, borderRadius: R.pill, paddingHorizontal: 6, paddingVertical: 1 }}>
+          <Text style={{ color: C.sub, fontSize: 10, fontWeight: '800', letterSpacing: 0.3 }}>{t}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 /** A row of chips: swipes sideways on a phone, wraps onto more lines on desktop where there's no swiping. */
 export function ChipRow({ children, style }: { children: React.ReactNode; style?: StyleProp<ViewStyle> }) {
   const { wide } = useLayout();
+  // On a TV the remote scrolls the focused chip into view natively (Android's ScrollView asks for the
+  // focused child), so one horizontal row reaches every chip without the many Down presses a wrapped
+  // stack costs. The passed style stays on a wrapper, so its margins/padding behave as on desktop.
+  if (isTV) return (
+    <View style={style}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ paddingHorizontal: 20, gap: 8, alignItems: 'center' }}>
+        {children}
+      </ScrollView>
+    </View>
+  );
   if (wide) return <View style={[{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 20 }, style]}>{children}</View>;
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={[{ paddingHorizontal: 20, gap: 8 }, style]}>

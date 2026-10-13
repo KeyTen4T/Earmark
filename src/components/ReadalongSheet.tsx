@@ -16,6 +16,7 @@ import { readalongBridge, type ReadalongStatus } from '../readalong/desktop';
 import { chapterTitle, type TBTorrent, type TBFile } from '../torbox';
 import type { BookMeta } from '../storage';
 import { loadReadalong, deleteReadalong, loadPendingJobs, savePendingJobs, saveReadalong, loadEbookSearchUrl } from '../storage';
+import { onSyncApplied } from '../sync';
 import { isDenseRecord, type ReadalongRecord } from '../readalong/anchors';
 import type { EbookCandidate } from '../readalong/ebookSearch';
 import { findEpubCandidates, searchEpubCandidates, searchTerms, runReadalong, cancelBuild, submitServerBuild } from '../readalong/create';
@@ -121,6 +122,11 @@ export function ReadalongSheet({ visible, onClose, book, meta, chapters, index }
 
     return () => { alive = false; };
   }, [visible, book.hash]);
+
+  // A sync from another device can bring the address while this sheet is open; take it without a restart.
+  useEffect(() => onSyncApplied(() => {
+    loadEbookSearchUrl().then(setSearchUrl, () => setSearchUrl(''));
+  }), []);
 
   // A finished local job refreshes the saved record and announces itself once.
   useEffect(() => {

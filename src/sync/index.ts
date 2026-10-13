@@ -13,7 +13,8 @@ import type { TBTorrent } from '../torbox';
 import {
   loadProgress, applyRemoteProgress, removeProgress, loadMeta, applyRemoteMeta,
   loadHiddenBooks, applyRemoteHidden, loadWishlist, applyRemoteWishlist,
-  loadSettings, applyRemoteSettings, loadStamps, loadAllReadalong, applyRemoteReadalong,
+  loadSettings, applyRemoteSettings, loadEbookSearchUrl, applyRemoteEbookSearch,
+  loadStamps, loadAllReadalong, applyRemoteReadalong,
   loadGistId, saveGistId, clearGistId, getGithubToken, setGithubToken, clearGithubToken,
 } from '../storage';
 
@@ -174,8 +175,8 @@ const stampAt = (s: number | undefined) => Math.max(s ?? 0, 1); // pre-existing 
 
 /** Local storage -> sync document. Progress is keyed by info-hash via the library list. */
 export async function buildLocalDoc(): Promise<SyncDoc> {
-  const [progress, meta, hidden, wishlist, settings, stamps, readalong] = await Promise.all([
-    loadProgress(), loadMeta(), loadHiddenBooks(), loadWishlist(), loadSettings(), loadStamps(), loadAllReadalong(),
+  const [progress, meta, hidden, wishlist, settings, ebookUrl, stamps, readalong] = await Promise.all([
+    loadProgress(), loadMeta(), loadHiddenBooks(), loadWishlist(), loadSettings(), loadEbookSearchUrl(), loadStamps(), loadAllReadalong(),
   ]);
   const doc = emptyDoc();
 
@@ -201,6 +202,12 @@ export async function buildLocalDoc(): Promise<SyncDoc> {
   for (const id of Object.keys(stamps.wishlist)) if (!wishIds.has(id)) doc.wishlist[id] = { value: null, updated: stampAt(stamps.wishlist[id]) };
 
   doc.settings = { value: { rate: settings.rate, skipBack: settings.skipBack, skipForward: settings.skipForward }, updated: stampAt(stamps.settings) };
+
+  // A device that never set the address carries stamp 0, so any synced value (which is stamped when
+  // it changes) wins the merge. A deliberate clear is `''` with a fresh stamp and wins in turn.
+  // An address typed in before this was synced has no stamp: it counts as an edit (1) so it reaches a
+  // device that never had one (0), while any stamped change still beats it.
+  doc.ebookSearch = { value: ebookUrl, updated: stamps.ebookSearch || (ebookUrl ? 1 : 0) };
 
   for (const [hash, rec] of Object.entries(readalong)) doc.readalong[hash.toLowerCase()] = { value: rec, updated: stampAt(stamps.readalong[hash.toLowerCase()]) };
   for (const [hash, updated] of Object.entries(stamps.readalong)) if (!(hash in doc.readalong)) doc.readalong[hash] = { value: null, updated: stampAt(updated) };
@@ -233,6 +240,7 @@ async function applyMerged(merged: SyncDoc, local: SyncDoc): Promise<boolean> {
   if (readalong.length) { await applyRemoteReadalong(readalong); changed = true; }
 
   if (!same(local.settings, merged.settings)) { await applyRemoteSettings(merged.settings.value, merged.settings.updated); changed = true; }
+  if (!same(local.ebookSearch, merged.ebookSearch)) { await applyRemoteEbookSearch(merged.ebookSearch.value, merged.ebookSearch.updated); changed = true; }
   return changed;
 }
 

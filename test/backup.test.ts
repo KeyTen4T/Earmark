@@ -112,6 +112,22 @@ test('backup merge: newest record wins, sources added by id, blanks filled only 
   assert.deepEqual([...m.disabled].sort(), ['a', 'c']);
 });
 
+test('backup merge: the EPUB search address follows the newest stamped record', () => {
+  const older = data({
+    sync: { ...emptyDoc(), ebookSearch: { value: 'https://device.example/search?q={query}', updated: 10 } },
+    ebookSearchUrl: 'https://device.example/search?q={query}',
+  });
+  const newer = data({
+    sync: { ...emptyDoc(), ebookSearch: { value: 'https://file.example/search?q={query}', updated: 20 } },
+    ebookSearchUrl: 'https://file.example/search?q={query}',
+  });
+  assert.equal(mergeBackupData(older, newer).ebookSearchUrl, 'https://file.example/search?q={query}');
+  assert.equal(mergeBackupData(newer, older).ebookSearchUrl, 'https://file.example/search?q={query}');
+  // A deliberately cleared record (stamp > 0, value '') clears the top-level field too.
+  const cleared = data({ sync: { ...emptyDoc(), ebookSearch: { value: '', updated: 30 } }, ebookSearchUrl: '' });
+  assert.equal(mergeBackupData(older, cleared).ebookSearchUrl, '');
+});
+
 test('backup: narrators ride a backup, parse tolerantly, union on Merge and take the file on Replace', () => {
   // A backup from before this feature has no list, and one with junk in it keeps only real names.
   assert.deepEqual(parseBackup({ app: 'earmark', kind: 'backup', version: 1, data: { sync: {} } }).data.narrators, []);
@@ -169,6 +185,8 @@ test('backup replace: file records re-stamped, device-only records tombstoned', 
   assert.equal(out.progress.keep.updated, 1000);
   assert.equal('gone' in out.progress, false);
   assert.equal(out.settings.updated, 1000);
+  assert.equal(out.ebookSearch.value, '');
+  assert.equal(out.ebookSearch.updated, 1000);
 });
 
 test('backup: Replace keeps the finish date of a book that only had its progress time', () => {

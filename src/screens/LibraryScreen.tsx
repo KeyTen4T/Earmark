@@ -5,7 +5,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, paletteFor, fmtApprox, prettyName } from '../theme';
-import { Tap, Cover, Bar, Chip, ChipRow, Sheet, Empty, Button, IconButton, toast, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, confirmAction, Input, type IconName } from '../components/ui';
+import { Tap, Cover, Bar, Chip, ChipRow, Sheet, Empty, Button, IconButton, toast, FadeIn, Pop, Skeleton, HeroHeader, StickyBar, useScrollY, confirmAction, Input, AudioBadges, type IconName } from '../components/ui';
 import { TBTorrent, isReady, isStuck, chapterList, addMagnet, deleteTorrent } from '../torbox';
 import { Progress, BookMeta, bookFraction, loadHiddenBooks, saveHiddenBooks, saveMeta, saveProgress, saveReadElsewhere, removeReadElsewhere } from '../storage';
 import { remainingBookSeconds } from '../book-math';
@@ -23,6 +23,11 @@ import { syncRating } from '../hardcover';
 import type { ReadElsewhere } from '../reading-history';
 
 type Filter = 'all' | 'listening' | 'new' | 'done';
+
+// On a TV the card's focus ring is a 3px border drawn inside it; without inner padding it lies on
+// top of the title's first letters ("arry Potter"). The cover shrinks by the same amount so the cell
+// keeps its width and the grid does not reflow.
+const CARD_PAD = 4;
 
 export function LibraryScreen(props: {
   token: string;
@@ -214,7 +219,10 @@ export function LibraryScreen(props: {
   const gap = wide ? 20 : 14;
   const [gridW, setGridW] = useState(0);
   const avail = wide && gridW ? gridW : contentWidth;
-  const cols = wide ? Math.max(2, Math.floor((avail - 40 + gap) / (190 + gap))) : 2;
+  // A TV is only 540 units tall, so its covers are smaller, and smaller again while the player bar
+  // takes the bottom of the screen: otherwise barely one row of the grid is visible.
+  const coverTarget = isTV ? (player.book ? 112 : 132) : 190;
+  const cols = wide ? Math.max(2, Math.floor((avail - 40 + gap) / (coverTarget + gap))) : 2;
   const col = Math.floor((avail - 20 * 2 - gap * (cols - 1)) / cols);
   const hour = new Date().getHours();
   const greet = hour < 5 ? 'Late night listening' : hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
@@ -259,6 +267,7 @@ export function LibraryScreen(props: {
                     <View>
                       <Text style={[T.label, { color: 'rgba(255,255,255,0.7)' }]}>Continue listening</Text>
                       <Text numberOfLines={2} style={[T.h2, { marginTop: 6 }]}>{m(hero).title ?? prettyName(hero.name)}</Text>
+                      <AudioBadges name={hero.name} style={{ marginTop: 6 }} />
                       {m(hero).author ? <Text numberOfLines={1} style={[T.body, { marginTop: 2 }]}>{m(hero).author}</Text> : null}
                     </View>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
@@ -387,9 +396,9 @@ export function LibraryScreen(props: {
                   const left = p && !p.finished ? remainingBookSeconds(sizes, p.chapterIndex, p.position, p.duration, p.chapterCount) : null;
                   return (
                     <FadeIn key={b.id} index={i} delay={80} style={{ width: col, marginBottom: 8 }}>
-                    <Tap haptic onPress={() => { onOpen(b); player.open(b, md, { autoplay: true }); }} onMenu={() => setMenu(b)} accessibilityLabel={cardLabel(b)} accessibilityHint="Long press for options" hoverStyle={{ backgroundColor: C.hover, borderRadius: R.md }}>
+                    <Tap haptic onPress={() => { onOpen(b); player.open(b, md, { autoplay: true }); }} onMenu={() => setMenu(b)} accessibilityLabel={cardLabel(b)} accessibilityHint="Long press for options" hoverStyle={{ backgroundColor: C.hover, borderRadius: R.md }} style={isTV ? { padding: CARD_PAD } : undefined}>
                       <View>
-                        <Cover title={b.name} uri={md.cover} size={col} radius={R.md} />
+                        <Cover title={b.name} uri={md.cover} size={isTV ? col - CARD_PAD * 2 : col} radius={R.md} />
                         {p?.finished && (
                           <View style={{ position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: R.pill, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', gap: 4, alignItems: 'center' }}>
                             <Ionicons name="checkmark" size={12} color={C.good} /><Text style={{ color: C.text, fontSize: 11, fontWeight: '700' }}>Done</Text>
@@ -408,6 +417,7 @@ export function LibraryScreen(props: {
                           <Ionicons name="ellipsis-horizontal" size={18} color={C.sub} />
                         </Tap>
                       </View>
+                      <AudioBadges name={b.name} style={{ marginTop: 6 }} />
                       <Text numberOfLines={1} style={[T.small, { marginTop: 3 }]}>
                         {md.author ?? `${chapterList(b).length} chapter${chapterList(b).length === 1 ? '' : 's'} · ${formatBytes(b.size)}`}
                       </Text>

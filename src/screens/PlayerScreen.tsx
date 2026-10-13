@@ -4,7 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C, R, T, paletteFor, fmtTime, fmtApprox, prettyName } from '../theme';
-import { Tap, Cover, Sheet, Button, IconButton, toast, Pop, FadeIn, SkipIcon, Input } from '../components/ui';
+import { Tap, Cover, Sheet, Button, IconButton, toast, Pop, FadeIn, SkipIcon, Input, AudioBadges } from '../components/ui';
 import { Scrubber } from '../components/Scrubber';
 import { usePlayer } from '../player/PlayerContext';
 import { remainingBookSeconds } from '../book-math';
@@ -111,6 +111,7 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
 }) {
   const p = usePlayer();
   const { height } = useWindowDimensions();
+  const [paneRest, setPaneRest] = useState(0); // height of the two-pane player's title and controls, measured
   // Inside an Android Modal neither the app-level insets nor SafeAreaView reliably report the
   // navigation bar, and a three-button bar (48dp) then covers the bottom row. Reserve at least that
   // much on Android whatever the insets say; on gesture phones it is just a little extra space. A TV
@@ -309,7 +310,15 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   const twoPane = panes.twoPane;
   // The left pane stays a comfortable fixed width; the cover is scaled to fit it rather than filling it.
   const paneWidth = Math.min(430, Math.max(370, Math.round(windowWidth * 0.34)));
-  const paneArt = Math.max(140, Math.min(paneWidth - 48, height * 0.42, 340));
+  // A TV at 1080p is only 540 units tall: there the pane's fixed rows (header, title, scrubber,
+  // compact transport, pills: about 400) leave little for the cover, so it shrinks and the transport
+  // goes compact. Otherwise the transport and pills fall below the screen, behind a scroll.
+  const shortPane = height < 640;
+  // The cover gets exactly what the measured title and controls leave (they vary: a two-line title,
+  // an error banner). Fixed rows: top padding 6, header 46, cover margins 10, pane padding 8.
+  const paneArt = shortPane
+    ? Math.max(88, Math.min(paneWidth - 48, paneRest ? height - appInsets.top - bottomPad - 70 - paneRest - 6 : height - 410))
+    : Math.max(140, Math.min(paneWidth - 48, height * 0.42, 340));
   const paneTitle = showingText ? 'Read along' : `${p.chapterCount} chapter${p.chapterCount === 1 ? '' : 's'}`;
 
   const readalongView = () => (
@@ -359,12 +368,13 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
 
   const hcFailed = !!hcLink && !!hcError;
   const titleRow = (
-    <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 12, marginBottom: 18 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 12, marginBottom: twoPane && shortPane ? 6 : 18 }}>
       <View style={{ flex: 1 }}>
         <Text numberOfLines={2} style={[T.h2, { fontSize: 24, letterSpacing: -0.5 }]}>{p.displayTitle}</Text>
         <Text numberOfLines={1} style={[T.body, { marginTop: 4, fontSize: 15 }]}>
           {p.meta.author ?? hcLink?.authors?.[0] ?? p.chapterName}
         </Text>
+        <AudioBadges name={book.name} style={{ marginTop: 6 }} />
       </View>
       {hcOn && (
         <Tap onPress={() => setSheet('hardcover')} scaleTo={0.9} style={{
@@ -384,7 +394,9 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
   // the list — and a one-file read-along pins its text, so its Read toggle is dropped too. While the
   // phone shows the text, `compact` shrinks the transport and drops the "left in book" line to give
   // the reading more room; everything else is identical.
-  const controls = (desktop: boolean, compact = false) => (
+  // `dense` (the two-pane player on a short screen, i.e. a TV) also drops the chapter-name line, which
+  // the chapter list beside it already shows, and tightens the gaps: every row saved goes to the cover.
+  const controls = (desktop: boolean, compact = false, dense = false) => (
     <>
       {p.error ? (
         <Tap onPress={() => p.goChapter(p.index)} style={{ flexDirection: 'row', gap: 8, alignItems: 'center', padding: 10, borderRadius: R.md, backgroundColor: 'rgba(255,107,107,0.12)', marginBottom: 10 }}>
@@ -393,13 +405,15 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         </Tap>
       ) : null}
 
-      <Scrubber position={p.position} duration={p.duration} onSeek={p.seek} />
-      <Text numberOfLines={1} style={[T.small, { textAlign: 'center', marginTop: 6 }]}>{p.recovering ? 'Reconnecting…' : p.chapterName}{!p.recovering && p.local && Platform.OS !== 'web' ? ' · Downloaded' : ''}</Text>
+      <Scrubber position={p.position} duration={p.duration} onSeek={p.seek} step={p.seekStep} />
+      {dense && !p.recovering ? null : (
+        <Text numberOfLines={1} style={[T.small, { textAlign: 'center', marginTop: 6 }]}>{p.recovering ? 'Reconnecting…' : p.chapterName}{!p.recovering && p.local && Platform.OS !== 'web' ? ' · Downloaded' : ''}</Text>
+      )}
       {bookLeft != null && !compact ? (
         <Text numberOfLines={1} style={[T.small, { textAlign: 'center', marginTop: 2 }]}>About {fmtApprox(bookLeft)} left in book</Text>
       ) : null}
 
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: compact ? 10 : 18, marginBottom: compact ? 14 : 26 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: dense ? 4 : compact ? 10 : 18, marginBottom: dense ? 8 : compact ? 14 : 26 }}>
         <IconButton label="Previous chapter" name="play-skip-back" size={compact ? 22 : 26} onPress={p.prevChapter} />
         <Tap onPress={() => p.skip(-p.skipBack)} haptic scaleTo={0.8} hitSlop={8} accessibilityLabel={`Skip back ${p.skipBack} seconds`} style={{ padding: 8 }}>
           <SkipIcon dir="back" seconds={p.skipBack} size={compact ? 28 : 34} />
@@ -472,15 +486,17 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
       <Animated.View style={{ width: paneWidth, borderRightWidth: 1, borderRightColor: C.line, opacity: chromeOpacity, display: chromeCollapsed ? 'none' : 'flex' }}>
         <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 8 }}>
           {headerRow(true)}
-          <View style={{ alignItems: 'center', marginTop: 8, marginBottom: 18 }}>
+          <View style={{ alignItems: 'center', marginTop: shortPane ? 2 : 8, marginBottom: shortPane ? 8 : 18 }}>
             <Animated.View style={{ transform: [{ scale: artScale }] }}>
               <Tap onPress={() => setSheet('cover')} scaleTo={0.98} accessibilityLabel="Change cover" style={{ shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 30, shadowOffset: { width: 0, height: 16 }, elevation: 24, borderRadius: R.lg }}>
                 <Cover title={book.name} uri={p.meta.cover ?? hcLink?.image} size={paneArt} radius={R.lg} />
               </Tap>
             </Animated.View>
           </View>
-          {titleRow}
-          {controls(true)}
+          <View onLayout={shortPane ? (e) => setPaneRest(Math.round(e.nativeEvent.layout.height)) : undefined}>
+            {titleRow}
+            {controls(true, shortPane, shortPane)}
+          </View>
         </ScrollView>
       </Animated.View>
 
