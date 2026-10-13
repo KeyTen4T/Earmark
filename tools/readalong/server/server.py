@@ -83,6 +83,10 @@ def _split_delays(raw: str) -> tuple:
     return tuple(float(part) for part in raw.split(",") if part.strip())
 
 
+# Environment variables the service reads its secrets from; never passed on to the tool it runs.
+CHILD_ENV_DROPPED = ("API_TOKEN", "TORBOX_API_KEY", "GITHUB_GIST_TOKEN")
+
+
 @dataclass
 class Config:
     api_token: str
@@ -670,8 +674,11 @@ class ReadalongServer:
 
     @staticmethod
     def _spawn(cmd: list, errfh):
+        # The tool gets its TorBox key from the job's config.json and needs none of the service's
+        # secrets, so they are kept out of its environment.
+        env = {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROPPED}
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfh,
-                                text=True, bufsize=1, close_fds=True)
+                                text=True, bufsize=1, close_fds=True, env=env)
 
     def _handle_event(self, job_id: str, event: dict, anchors_path: str) -> None:
         if self._is_cancelled(job_id):

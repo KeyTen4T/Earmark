@@ -103,6 +103,7 @@ def main():
     if marker:
         with open(marker, "a") as fh:
             fh.write("started\\n")
+            fh.write("secrets:" + ",".join(k for k in ("API_TOKEN", "TORBOX_API_KEY", "GITHUB_GIST_TOKEN") if k in os.environ) + "\\n")
 
     data = json.load(open(a.paragraphs))
     paras = data["paragraphs"]
@@ -248,6 +249,8 @@ class ServerTestCase(unittest.TestCase):
         os.environ["FAKE_SLEEP"] = "0"
         os.environ["FAKE_MARKER"] = os.path.join(self.tmp, "marker")
         os.environ["TORBOX_API_KEY"] = TORBOX_KEY
+        os.environ["API_TOKEN"] = API_TOKEN
+        os.environ["GITHUB_GIST_TOKEN"] = GIST_TOKEN
 
         self.config = sv.Config(
             api_token=API_TOKEN,
@@ -438,6 +441,9 @@ class ServerTestCase(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(job_dir, "config.json")))
         self.assertTrue(os.path.exists(os.environ["FAKE_MARKER"]),
                         "the fake tool should have created the audio dir")
+        # The tool ran without the service's secrets in its environment.
+        with open(os.environ["FAKE_MARKER"]) as fh:
+            self.assertIn("secrets:\n", fh.read())
 
     def test_progress_statuses(self):
         os.environ["FAKE_SLEEP"] = "0.2"
