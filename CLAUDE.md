@@ -14,7 +14,21 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.14** (12 Oct): on Android TV the read-along's fade-away reading screen is
+- **Current release: 1.3.15** (12 Oct): Android TV made usable with a remote, after trying 1.3.14 on
+  the user's onn 4K Plus (driven over adb: `adb connect` to its address, `input keyevent DPAD_*`,
+  `uiautomator dump` to see which node is focused).
+  - On Android `accessible` alone makes a view focusable (`ReactViewManager.setAccessible`), so a view
+    that must not take the remote's focus needs `focusable={false}` and `accessible={false}`: the
+    `Sheet` backdrop, the `Scrubber`, and a disabled `Tap`.
+  - React Native's `ReactEditText` refuses focus from a D-pad. On TV `Input` in `ui.tsx` is a button
+    showing the value; selecting it mounts the real field with `autoFocus`. The on-screen keyboard
+    needs a second press of OK (RN only opens it by itself in touch mode).
+  - The focus ring is an overlay inside the control (`TVFocusRing`), white; an outline was clipped.
+  - `apk:local` builds `armeabi-v7a,arm64-v8a`: the onn is 32-bit only. The APK is about 44 MB.
+  - Seen working on the onn: sidebar, Library grid and options sheet, player, Settings list, the
+    read-along server sheet (typing), the source editor. Not checked: Discover search, the Hardcover
+    and sync sheets, the Shield, and the in-app installer (first real use is the update to 1.3.15).
+- **1.3.14** (12 Oct): on Android TV the read-along's fade-away reading screen is
   off (`chromeActive` in `PlayerScreen.tsx`); a remote could not bring the controls back. Worked out
   from the code, not seen on a TV.
 - **1.3.13** (12 Oct): Android TV, the in-app installer, and dense read-along timing (see
