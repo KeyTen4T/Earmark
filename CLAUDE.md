@@ -14,7 +14,31 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.17** (13 Oct): no new feature; four robustness and speed changes found by an
+- **Current release: 1.3.18** (13 Oct): 5.1 books as Dolby Digital on Android TV. Seen working on
+  the user's Shield (Vizio 5.1 soundbar over the TV's eARC); not run on a phone or the onn.
+  - The user's TV takes surround only as Dolby (2-channel PCM even over eARC), so Android downmixed
+    5.1 Opus to stereo. `modules/earmark-surround/` (local Expo module, Android only) encodes 6-channel
+    PCM16 to AC-3 at 640 kbps with aften 0.0.8 (vendored, LGPL-2.1) and passes it through:
+    `Ac3PassthroughAudioSink` wraps the `DefaultAudioSink`; `patches/expo-audio+57.0.5.patch` (via
+    patch-package) loads `SurroundRenderersFactory` by reflection. expo-audio ships a prebuilt AAR,
+    so `package.json` sets `expo.autolinking.android.buildFromSource: ["expo-audio"]`; without it the
+    patch is silently ignored. Re-check both on every Expo upgrade (the dex should contain
+    `buildSurroundRenderersFactory`).
+  - AC-3 is used when the input is 6-channel PCM16 at 48/44.1 kHz, the route accepts AC-3 5.1
+    passthrough, the speed is 1x and the setting is Auto. The advertised PCM channel count is not
+    used: the Shield claims 8 while its HAL refuses more than 2. Other speeds play the old PCM path
+    (stereo on that TV); speed-adjusted surround (step D) was skipped by the user's choice.
+  - Android's Opus/Vorbis decoders output Vorbis channel order; media3 passes the map in
+    `configure(..., outputChannels)` and the AC-3 path applies it before encoding. A laptop round
+    trip (`modules/earmark-surround/test/roundtrip.sh`) cannot catch an order bug; play a 5.1 Opus
+    channel-test file through the app (see `private/SURROUND-HANDOVER.md`).
+  - Settings → Playback → Surround sound (TV only, device-local): Auto / Stereo; a change re-opens
+    the chapter at the live position. The player shows "Dolby Digital 5.1" only while AC-3 is sent
+    (`src/surround.ts` → `outputMode()`).
+  - Success on a device: `EarmarkSurround: passthrough ac3 5.1 48000 map ...` in logcat and
+    `pass-thru: 1` in `dumpsys media.audio_flinger`. NVIDIA's HAL still logs `Sink does not support
+    multichannel` for the first open; that line is not a failure.
+- **1.3.17** (13 Oct): no new feature; four robustness and speed changes found by an
   audit, and a desktop fix. Run in a browser against a fake 120-book library; not run on Android or a TV.
   - Player state is two contexts in `PlayerContext.tsx`: `usePlayer()` (does not change per tick) and
     `usePlayerTick()` (the `TICK_FIELDS` of `src/player/visibility.ts`). Only what draws the position
