@@ -15,6 +15,7 @@ import {
   loadHiddenBooks, applyRemoteHidden, loadWishlist, applyRemoteWishlist,
   loadSettings, applyRemoteSettings, loadEbookSearchUrl, applyRemoteEbookSearch,
   loadStamps, loadAllReadalong, applyRemoteReadalong,
+  loadListeningLog, applyRemoteListening, loadListeningEstimate, applyRemoteListeningEstimate,
   loadGistId, saveGistId, clearGistId, getGithubToken, setGithubToken, clearGithubToken,
 } from '../storage';
 
@@ -34,6 +35,11 @@ const notifyStatus = () => { for (const l of statusListeners) l(status); };
 const setStatus = (patch: Partial<SyncStatus>) => { status = { ...status, ...patch }; notifyStatus(); };
 
 export const getSyncStatus = (): SyncStatus => status;
+/**
+ * The GitHub token sync is using, or null. Callers must send it as a header and never log it or put
+ * it in a URL. Used by the one-time estimate, which reads the gist's revision history.
+ */
+export const getSyncToken = (): string | null => token;
 export function subscribeSyncStatus(fn: (s: SyncStatus) => void): () => void {
   statusListeners.add(fn);
   fn(status);
@@ -175,8 +181,8 @@ const stampAt = (s: number | undefined) => Math.max(s ?? 0, 1); // pre-existing 
 
 /** Local storage -> sync document. Progress is keyed by info-hash via the library list. */
 export async function buildLocalDoc(): Promise<SyncDoc> {
-  const [progress, meta, hidden, wishlist, settings, ebookUrl, stamps, readalong] = await Promise.all([
-    loadProgress(), loadMeta(), loadHiddenBooks(), loadWishlist(), loadSettings(), loadEbookSearchUrl(), loadStamps(), loadAllReadalong(),
+  const [progress, meta, hidden, wishlist, settings, ebookUrl, stamps, readalong, listening, estimate] = await Promise.all([
+    loadProgress(), loadMeta(), loadHiddenBooks(), loadWishlist(), loadSettings(), loadEbookSearchUrl(), loadStamps(), loadAllReadalong(), loadListeningLog(), loadListeningEstimate(),
   ]);
   const doc = emptyDoc();
 
@@ -212,6 +218,9 @@ export async function buildLocalDoc(): Promise<SyncDoc> {
   for (const [hash, rec] of Object.entries(readalong)) doc.readalong[hash.toLowerCase()] = { value: rec, updated: stampAt(stamps.readalong[hash.toLowerCase()]) };
   for (const [hash, updated] of Object.entries(stamps.readalong)) if (!(hash in doc.readalong)) doc.readalong[hash] = { value: null, updated: stampAt(updated) };
 
+  doc.listening = listening;
+  doc.listeningEstimate = estimate;
+
   return doc;
 }
 
@@ -241,6 +250,8 @@ async function applyMerged(merged: SyncDoc, local: SyncDoc): Promise<boolean> {
 
   if (!same(local.settings, merged.settings)) { await applyRemoteSettings(merged.settings.value, merged.settings.updated); changed = true; }
   if (!same(local.ebookSearch, merged.ebookSearch)) { await applyRemoteEbookSearch(merged.ebookSearch.value, merged.ebookSearch.updated); changed = true; }
+  if (!same(local.listening, merged.listening)) { await applyRemoteListening(merged.listening); changed = true; }
+  if (!same(local.listeningEstimate, merged.listeningEstimate)) { await applyRemoteListeningEstimate(merged.listeningEstimate); changed = true; }
   return changed;
 }
 

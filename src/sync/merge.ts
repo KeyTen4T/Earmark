@@ -4,6 +4,7 @@
 
 import type { ReadalongRecord } from '../readalong/anchors';
 import { decodeSeekMap } from '../readalong/mp3seek';
+import { parseListening, mergeListening, parseListeningEstimate, mergeListeningEstimates, type ListeningLog, type ListeningEstimate } from '../listening-log';
 
 export const SYNC_VERSION = 1;
 
@@ -55,6 +56,16 @@ export type SyncDoc = {
   settings: Stamped<SettingsFields>;
   ebookSearch: EbookSearch;
   readalong: Record<string, Stamped<ReadalongRecord>>;
+  /**
+   * Per-device listening log: `{ [deviceId]: { ['YYYY-MM-DD']: { [torrentId]: { book, wall } } } }`.
+   * Another top-level key like ebookSearch: older versions carry unknown keys through untouched.
+   */
+  listening: ListeningLog;
+  /**
+   * The one-time estimate of listening that predates the log, or null. Same top-level-key treatment
+   * as `listening`; two devices that each built one converge on the earliest (see the merge).
+   */
+  listeningEstimate: ListeningEstimate | null;
   [key: string]: unknown;
 };
 
@@ -62,6 +73,7 @@ export function emptyDoc(): SyncDoc {
   return {
     v: SYNC_VERSION, progress: {}, meta: {}, hidden: {}, wishlist: {},
     settings: { value: null, updated: 0 }, ebookSearch: { value: '', updated: 0 }, readalong: {},
+    listening: {}, listeningEstimate: null,
   };
 }
 
@@ -190,6 +202,9 @@ export function parseDoc(raw: unknown): SyncDoc {
       doc.readalong[k] = { value: rec, updated: num(val.updated) };
     }
   }
+  // Malformed devices, days or leaves are dropped; a missing key leaves the empty log.
+  doc.listening = parseListening(raw.listening);
+  doc.listeningEstimate = parseListeningEstimate(raw.listeningEstimate);
   for (const key of Object.keys(raw)) if (!(key in doc)) doc[key] = raw[key];
   return doc;
 }
@@ -224,7 +239,7 @@ function mergeProgress(a: Record<string, ProgressRecord>, b: Record<string, Prog
   return out;
 }
 
-const KNOWN = new Set(['v', 'progress', 'meta', 'hidden', 'wishlist', 'settings', 'ebookSearch', 'readalong']);
+const KNOWN = new Set(['v', 'progress', 'meta', 'hidden', 'wishlist', 'settings', 'ebookSearch', 'readalong', 'listening', 'listeningEstimate']);
 
 /** Per-record last-write-wins merge. Idempotent and commutative. */
 export function mergeDocs(a: SyncDoc, b: SyncDoc): SyncDoc {
@@ -237,6 +252,8 @@ export function mergeDocs(a: SyncDoc, b: SyncDoc): SyncDoc {
   out.settings = newerStamped(a.settings, b.settings);
   out.ebookSearch = newerEbookSearch(a.ebookSearch, b.ebookSearch);
   out.readalong = mergeStamped(a.readalong, b.readalong);
+  out.listening = mergeListening(a.listening ?? {}, b.listening ?? {});
+  out.listeningEstimate = mergeListeningEstimates(a.listeningEstimate ?? null, b.listeningEstimate ?? null);
 
   // Unknown top-level keys (a future version may add some) are preserved with a deterministic pick.
   for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {

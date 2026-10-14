@@ -2,9 +2,9 @@
 // stored (possibly older) object into the current shape. `storage.ts` wires these to AsyncStorage;
 // keeping them here, with no react-native/expo imports, lets the Node test runner cover them.
 //
-// rate/skipBack/skipForward sync through the gist. seekStep, lastBookId and surround are
-// device-local: the TV's own remote step and the TV's own audio route differ per device, so a
-// change to them is never pushed as a synced edit.
+// rate/skipBack/skipForward sync through the gist. seekStep, lastBookId, surround and
+// rewindAfterPause are device-local: the TV's own remote step, the TV's own audio route and a
+// listener's own patience differ per device, so a change to them is never pushed as a synced edit.
 
 export type SurroundSetting = 'auto' | 'stereo';
 
@@ -14,25 +14,30 @@ export type Settings = {
   skipForward: number;
   seekStep: number;
   surround: SurroundSetting;
+  /** Whether playback jumps back a little when it resumes after a pause. */
+  rewindAfterPause: boolean;
   lastBookId?: number;
 };
 
-export const DEFAULT_SETTINGS: Settings = { rate: 1, skipBack: 15, skipForward: 30, seekStep: 5, surround: 'auto' };
+export const DEFAULT_SETTINGS: Settings = { rate: 1, skipBack: 15, skipForward: 30, seekStep: 5, surround: 'auto', rewindAfterPause: true };
 
 /**
  * Fills a stored settings object out to the current shape. An object saved before `surround`
  * existed has no value there, so it becomes the default `'auto'`; any unrecognised value is
- * treated the same way rather than trusted.
+ * treated the same way rather than trusted. `rewindAfterPause` predates nothing yet, but a stored
+ * object can still carry a missing or non-boolean value, which becomes the default `true`.
  */
 export function mergeSettings(stored: Partial<Settings> | null | undefined): Settings {
   const merged = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
   if (merged.surround !== 'auto' && merged.surround !== 'stereo') merged.surround = 'auto';
+  if (typeof merged.rewindAfterPause !== 'boolean') merged.rewindAfterPause = true;
   return merged;
 }
 
 /**
- * Whether two settings differ in a field that syncs. The device-local fields (seekStep, lastBookId
- * and surround) are deliberately excluded, so changing one is not a real change to push.
+ * Whether two settings differ in a field that syncs. The device-local fields (seekStep, surround,
+ * rewindAfterPause and lastBookId) are deliberately excluded, so changing one is not a real change
+ * to push.
  */
 export function syncedSettingsChanged(a: Settings, b: Settings): boolean {
   return a.rate !== b.rate || a.skipBack !== b.skipBack || a.skipForward !== b.skipForward;

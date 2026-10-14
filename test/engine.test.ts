@@ -78,6 +78,10 @@ import './remote-progress.test.ts';
 import './fetch-timeout.test.ts';
 // The playback-settings defaults and the device-local/synced split (the surround choice is local).
 import './settings.test.ts';
+// How far to rewind when playback resumes, by how long it was paused.
+import './rewind.test.ts';
+// The listening log: the accumulation rule, the cross-device merge and the pure stats.
+import './listening.test.ts';
 
 test('sha1 matches node crypto across lengths', () => {
   for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 1000, 70000]) {

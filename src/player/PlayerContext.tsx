@@ -5,15 +5,17 @@ import type { AudioPlayer } from 'expo-audio';
 import { TBTorrent, TBFile, chapterList, chapterTitle, getStreamUrl } from '../torbox';
 import { chapterAt, chapterBounds, type EmbeddedChapter } from '../chapters/embedded';
 import { fetchEmbeddedChapters } from '../chapters/fetch';
-import { loadProgress, saveProgress, saveMeta, loadSettings, saveSettings, loadEmbeddedChapters, saveEmbeddedChapters, BookMeta } from '../storage';
+import { loadProgress, saveProgress, saveMeta, loadSettings, saveSettings, loadEmbeddedChapters, saveEmbeddedChapters, loadDeviceId, flushListening, BookMeta } from '../storage';
 import { setSurroundEnabled } from '../surround';
 import type { SurroundSetting } from '../settings';
 import { prettyName } from '../theme';
 import { syncProgress } from '../hardcover';
 import { syncNow, syncAfterProgress, onSyncApplied } from '../sync';
+import { listeningAdvance, addListening, localDay, type ListenAnchor, type ListeningLog } from '../listening-log';
 import { decideRecovery, nextRecovery, recoverySettled, STALL_MS, type PlaybackSnapshot } from './recovery';
 import { shouldPushUpdate, TICK_FIELDS } from './visibility';
 import { detectJump, seekSettled } from './seekbase';
+import { rewindFor, rewindPosition } from './rewind';
 import { localUriFor, markFileForRedownload } from '../downloads';
 
 type SleepMode = { kind: 'minutes'; endsAt: number } | { kind: 'chapter' } | null;
@@ -54,6 +56,8 @@ type PlayerState = {
   seekStep: number;
   /** Whether 5.1 books are offered as Dolby Digital (AC-3), or always downmixed to stereo. TV only. */
   surround: SurroundSetting;
+  /** Whether playback jumps back a little when it resumes after a pause. */
+  rewindAfterPause: boolean;
 };
 
 /** A field a playback status tick can move; these are the ones held back while backgrounded. */
@@ -65,7 +69,7 @@ type PlayerTick = Pick<PlayerState, TickField>;
 /** The action functions: stable identities, so the stable context value never changes per tick. */
 type PlayerActions = Pick<PlayerApi, 'open' | 'toggle' | 'seek' | 'skip' | 'goChapter' | 'pickChapter'
   | 'prevChapter' | 'nextChapter' | 'setRate' | 'setSleep' | 'setSkips' | 'setSeekStep' | 'setSurround' | 'stop'
-  | 'updateMeta' | 'isPlaying'>;
+  | 'setRewindAfterPause' | 'updateMeta' | 'isPlaying'>;
 
 /**
  * Everything that is NOT a per-tick field, plus the actions and the chapter-derived values. The value
@@ -87,6 +91,8 @@ type PlayerApi = Omit<PlayerState, TickField> & {
   setSkips: (back: number, forward: number) => void;
   setSeekStep: (seconds: number) => void;
   setSurround: (mode: SurroundSetting) => void;
+  /** Turns the rewind-on-resume playback aid on or off (device-local). */
+  setRewindAfterPause: (on: boolean) => void;
   stop: () => void;
   /** Refreshes the now-playing book's metadata (e.g. a new cover); ignored if another book is playing. */
   updateMeta: (bookId: number, m: BookMeta) => void;
@@ -120,13 +126,14 @@ export const usePlayerTick = () => {
 const LINK_TTL_MS = 2 * 60 * 60 * 1000; // re-request TorBox links older than this
 const CHECK_INTERVAL_MS = 3_000; // how often the stall watchdog runs
 const INTENT_GRACE_MS = 2_000; // ignore a brief "paused" right after we asked to play
+const LISTEN_FLUSH_MS = 30_000; // how often the in-memory listening log is written to storage
 
 export function PlayerProvider({ token, children }: { token: string; children: React.ReactNode }) {
   const [s, setS] = useState<PlayerState>({
     book: null, meta: {}, chapters: [], embedded: null, index: 0, position: 0, positionAt: 0, seekPending: false,
     seekBase: null,
     duration: 0, playing: false, loading: false,
-    recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30, seekStep: 5, surround: 'auto',
+    recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30, seekStep: 5, surround: 'auto', rewindAfterPause: true,
   });
   const st = useRef(s);
   // Whether React is currently drawing. While the app is backgrounded the refs keep advancing but
@@ -146,6 +153,21 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   const sleepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sleepChapter = useRef<number | null>(null); // the embedded chapter an "end of chapter" timer is waiting on
   const loadToken = useRef(0);
+
+  // ---- Listening log. The anchor and the pending deltas live only in refs, so a playback status
+  // tick never re-renders anything; the log is flushed to storage every ~30 s and wherever progress
+  // is persisted for real (pause, book change, app background). ----
+  const listenDevice = useRef('');
+  const listenAnchor = useRef<ListenAnchor>(null);
+  const listenPending = useRef<ListeningLog>({});
+  const listenFlushedAt = useRef(0);
+
+  // ---- Rewind after a pause. `pausedAt` is the wall-clock ms a genuine pause began (any cause:
+  // the button, an OS interruption, headphones, the lock screen, the sleep timer); it is consumed
+  // by the first resume. `loadStarted` marks a source swap (a chapter load, an auto-advance or a
+  // recovery reload) so its play is never mistaken for a resume. ----
+  const pausedAt = useRef<number | null>(null);
+  const loadStarted = useRef(false);
 
   // ---- Stream recovery. User intent is tracked separately from what the player reports, so a
   // system interruption (which just pauses us) is never mistaken for a dead link. ----
@@ -192,6 +214,26 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     reasonForWaitingToPlay: status.reasonForWaitingToPlay ?? '',
   });
 
+  // A genuine pause (not a source swap) began: remember when, so the resume can rewind. Called from
+  // every pause source; the status listener also catches the ones the app is not told about.
+  function notePaused() {
+    if (pausedAt.current === null) pausedAt.current = Date.now();
+  }
+
+  // Playback resumed after a recorded pause: go back by rewindFor once, then forget the pause.
+  // `seek` moves lastGoodPosition and the read-along seek base with the jump, so a recovery reload
+  // that follows starts from the rewound spot. A function (not a const) so the status listener,
+  // built before `seek` is assigned, can close over it.
+  function resumeRewind() {
+    const at = pausedAt.current;
+    pausedAt.current = null; // consume it whether or not the jump is worth making
+    if (at === null) return;
+    if (!st.current.rewindAfterPause) return; // the aid is off: the plain load resume applies
+    const pausedMs = Date.now() - at;
+    if (rewindFor(pausedMs) <= 0) return;
+    seek(rewindPosition(st.current.position, pausedMs));
+  }
+
   // Any user action cancels a pending recovery so it can't fight the new intent.
   function cancelRecovery() {
     if (recoveryTimer.current) { clearTimeout(recoveryTimer.current); recoveryTimer.current = null; }
@@ -217,6 +259,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     if (!wantPlaying.current || !st.current.book) return;
     if (localChapter.current) return; // a local file needs no fresh link
     if (recoveryTimer.current || recovering.current) return;
+    pausedAt.current = null; // a stall is not a pause; a stale record must not rewind a later resume
     const now = Date.now();
     if (!recoveryStartedAt.current) recoveryStartedAt.current = now;
     const plan = nextRecovery(recoveryAttempts.current, now - recoveryStartedAt.current);
@@ -271,11 +314,14 @@ export function PlayerProvider({ token, children }: { token: string; children: R
       // Tell the native sink the stored choice before any book is opened, so the very first chapter
       // of the session is configured with the right path.
       setSurroundEnabled(x.surround === 'auto');
-      patch({ rate: x.rate, skipBack: x.skipBack, skipForward: x.skipForward, seekStep: x.seekStep, surround: x.surround });
+      patch({ rate: x.rate, skipBack: x.skipBack, skipForward: x.skipForward, seekStep: x.seekStep, surround: x.surround, rewindAfterPause: x.rewindAfterPause });
     });
+    // The device-local id the listening log is keyed by; generated once on first use.
+    void loadDeviceId().then((id) => { listenDevice.current = id; }, () => {});
     const check = setInterval(checkNow, CHECK_INTERVAL_MS);
     return () => {
       // Pause before letting go: a released player can keep sounding in the background with nothing left to control it.
+      flushListen();
       clearInterval(check);
       if (recoveryTimer.current) clearTimeout(recoveryTimer.current);
       try { player.current?.pause(); } catch { /* already gone */ }
@@ -290,7 +336,9 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const sub = AppState.addEventListener('change', (next) => {
       const active = next !== 'background';
       appActive.current = active;
-      if (!active) return;
+      // Going to the background: write the listening log now, since progress may not be saved again
+      // until the OS pauses us. Ticks keep accumulating afterwards if the audio keeps playing.
+      if (!active) { flushListen(); return; }
       const status = (player.current as any)?.currentStatus;
       if (status) {
         const pos = status.currentTime ?? 0;
@@ -301,6 +349,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
         } else if (wantPlaying.current && Date.now() - wantPlayingSince.current > INTENT_GRACE_MS && !status.playing && !status.isBuffering && !status.error && !status.didJustFinish) {
           // The OS paused us while we were away (a call, another app took focus): don't fight it.
           wantPlaying.current = false;
+          notePaused(); // remember it, so the eventual resume rewinds like any other pause
           patch({ playing: false }); // active again, so this pushes the whole held-back state
           return;
         }
@@ -313,6 +362,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   }, []);
 
   const persist = useCallback((force = false) => {
+    if (force) flushListen();
     const c = st.current;
     if (!c.book || !c.chapters.length) return;
     // A recovery reload can briefly report 0; never let that wipe out real progress.
@@ -340,6 +390,32 @@ export function PlayerProvider({ token, children }: { token: string; children: R
       syncProgress(c.book.id, { sizes: c.chapters.map((f) => f.size), index: c.index, position: c.position, duration: c.duration }, finished, force);
     }
   }, []);
+
+  // Writes the in-memory listening deltas to storage and clears them. The snapshot is handed off
+  // before the async write, so ticks arriving meanwhile are not lost; a failed write is dropped
+  // rather than pausing playback. A queued write must not call another queued function, and
+  // `flushListening` is the only queued one here (the read inside it is plain storage).
+  function flushListen() {
+    const snapshot = listenPending.current;
+    listenPending.current = {};
+    if (!Object.keys(snapshot).length) return;
+    void flushListening(snapshot).catch(() => {});
+  }
+
+  // One playback status observation, recorded entirely in refs. The advance is only counted when it
+  // is plausible for the wall-clock time and rate (a seek or chapter jump is dropped); a book change
+  // or a pause resets the anchor. Never touches React state.
+  function recordListen(position: number, playing: boolean, now: number) {
+    const book = st.current.book;
+    const r = listeningAdvance(listenAnchor.current, book?.id ?? 0, position, playing && !!book, st.current.rate, now);
+    listenAnchor.current = r.anchor;
+    if (!book || !listenDevice.current || !r.book) return;
+    addListening(listenPending.current, listenDevice.current, localDay(now), String(book.id), r.book, r.wall);
+    if (now - listenFlushedAt.current >= LISTEN_FLUSH_MS) {
+      listenFlushedAt.current = now;
+      flushListen();
+    }
+  }
 
   const ensurePlayer = () => {
     if (player.current) return player.current;
@@ -392,6 +468,19 @@ export function PlayerProvider({ token, children }: { token: string; children: R
       }
       lastSnapshot.current = snap;
 
+      // Rewind-after-pause bookkeeping. A "pause" is the player going from playing to not, that is
+      // not a source swap: a chapter load, an auto-advance or a recovery reload all set `loadStarted`
+      // (or leave `pend`/`loading`/`recovering` set), which this skips. A resume is the reverse
+      // transition; its seek is applied after this tick's position report so it is not overwritten.
+      const freshLoad = loadStarted.current;
+      if (snap.playing) loadStarted.current = false;
+      // Buffering also drops `playing` on Android; a network stall is not a pause, and counting it would
+      // let the rewind's own seek rebuffer and rewind again.
+      if (prev && prev.playing && !snap.playing && !snap.isBuffering && !pend && !st.current.loading && !recovering.current && !freshLoad) {
+        notePaused();
+      }
+      const resumed = !!prev && !prev.playing && snap.playing && !pend && !recovering.current && !freshLoad;
+
       // A downloaded file that won't play isn't a stream problem: fall back to the stream for this
       // chapter and forget the file so it can be fetched again.
       if (snap.error && localChapter.current) {
@@ -418,6 +507,13 @@ export function PlayerProvider({ token, children }: { token: string; children: R
         playing: !!status.playing,
       });
 
+      // Listening stats: record the plausible advance of this tick (refs only, no re-render).
+      recordListen(pos, !!status.playing, Date.now());
+
+      // A resume after a recorded pause goes back a little; done here, after the report above, so the
+      // seek wins and the next tick reads it as a landing rather than a jump.
+      if (resumed) resumeRewind();
+
       // "End of chapter" for a one-file book: there is no file boundary to catch, so stop when playback
       // crosses into the next embedded chapter. Status ticks are too coarse to catch the boundary
       // itself, so remember the chapter the timer is waiting on and stop once a later one is playing.
@@ -431,6 +527,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
           wantPlaying.current = false;
           cancelRecovery();
           player.current?.pause();
+          notePaused(); // the sleep timer paused us; a resume later still rewinds
           patch({ sleep: null, playing: false });
           persist(true);
           return;
@@ -439,6 +536,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
 
       if (status.didJustFinish) {
         const c = st.current;
+        pausedAt.current = null; // a finished chapter (or book) is an end, not a pause
         const hasNext = c.index < c.chapters.length - 1;
         if (!hasNext) {
           st.current = { ...c, position: status.duration ?? c.position, playing: false };
@@ -503,6 +601,8 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const c = st.current;
     if (!c.book || !c.chapters[i]) return;
     const my = ++loadToken.current;
+    // A source swap is in progress: its play is not a resume from a pause (see the status listener).
+    loadStarted.current = true;
     // A fresh load carries the user's intent and a new progress anchor (recovery keeps its own).
     wantPlaying.current = autoplay;
     if (autoplay) wantPlayingSince.current = Date.now();
@@ -619,7 +719,13 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     let start = 0;
     if (opts.chapter === undefined && saved && !saved.finished) {
       const found = chapters.findIndex((c) => c.id === saved.fileId);
-      if (found >= 0) { idx = found; start = Math.max(0, saved.position - 3); } // rewind slightly on resume
+      if (found >= 0) {
+        idx = found;
+        // Rewind a little on resume. With the aid on, a pause since the last save pushes the start
+        // further back; with it off it stays the plain 3 s.
+        const back = st.current.rewindAfterPause ? Math.max(3, rewindFor(Date.now() - saved.updated)) : 3;
+        start = Math.max(0, saved.position - back);
+      }
     }
     if (st.current.book?.id === book.id && opts.chapter === undefined) {
       if (opts.autoplay && !st.current.playing) {
@@ -630,6 +736,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
       }
       return;
     }
+    pausedAt.current = null; // a different book starts fresh; no pause carries across
     player.current?.pause();
     st.current = { ...st.current, book, meta, chapters, embedded: null };
     patch({ book, meta, chapters, embedded: null });
@@ -645,14 +752,33 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const c = st.current;
     if (!c.book) return;
     // No player (it was released under us): rebuild it where we left off rather than leave the button dead.
-    if (!p) { cancelRecovery(); wantPlaying.current = true; wantPlayingSince.current = Date.now(); lastProgressAt.current = Date.now(); loadChapter(c.index, c.position, !c.playing); return; }
+    if (!p) {
+      cancelRecovery();
+      wantPlaying.current = true;
+      wantPlayingSince.current = Date.now();
+      lastProgressAt.current = Date.now();
+      resumeRewind(); // a resume through a rebuilt player still goes back after a pause
+      loadChapter(c.index, st.current.position, !c.playing);
+      return;
+    }
     // Ask the player itself; the last status update we saw can be out of date.
-    if (p.playing || c.playing) { wantPlaying.current = false; cancelRecovery(); p.pause(); patch({ playing: false }); persist(true); return; }
+    if (p.playing || c.playing) {
+      wantPlaying.current = false;
+      cancelRecovery();
+      p.pause();
+      notePaused(); // remember when, for the rewind on the next resume
+      patch({ playing: false });
+      persist(true);
+      return;
+    }
     cancelRecovery();
     wantPlaying.current = true;
     wantPlayingSince.current = Date.now();
     lastProgressAt.current = Date.now();
-    if (!localChapter.current && Date.now() - linkTime.current > LINK_TTL_MS) { loadChapter(c.index, c.position, true); return; }
+    // In-app resume after a pause goes back here, so the bookkeeping is in place before a possible
+    // link reload; `resumeRewind` is a no-op when there was no recorded pause.
+    resumeRewind();
+    if (!localChapter.current && Date.now() - linkTime.current > LINK_TTL_MS) { loadChapter(c.index, st.current.position, true); return; }
     p.play();
   };
 
@@ -660,6 +786,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const c = st.current;
     const t = Math.max(0, Math.min(c.duration || sec, sec));
     cancelRecovery(); // a user seek wins over any pending recovery position
+    pausedAt.current = null; // the user chose this spot; do not rewind on the next resume
     lastGoodPosition.current = t;
     lastProgressAt.current = Date.now();
     setSeekBase(t);
@@ -674,6 +801,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     const c = st.current;
     if (i < 0 || i >= c.chapters.length) return;
     cancelRecovery();
+    pausedAt.current = null; // a chapter jump is a chosen spot, not a resume
     persist(true);
     loadChapter(i, 0, true);
   };
@@ -727,6 +855,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
       wantPlaying.current = false;
       cancelRecovery();
       player.current?.pause();
+      notePaused(); // the sleep timer paused us; a resume later still rewinds
       persist(true);
       patch({ sleep: null });
     }, ms);
@@ -740,6 +869,11 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   const setSeekStep = (seconds: number) => {
     patch({ seekStep: seconds });
     saveSettings({ seekStep: seconds });
+  };
+
+  const setRewindAfterPause = (on: boolean) => {
+    patch({ rewindAfterPause: on });
+    saveSettings({ rewindAfterPause: on });
   };
 
   const setSurround = (mode: SurroundSetting) => {
@@ -762,6 +896,8 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     wantPlaying.current = false;
     localChapter.current = false;
     cancelRecovery();
+    pausedAt.current = null;
+    loadStarted.current = false;
     persist(true);
     player.current?.pause();
     const lock = (player.current as any)?.clearLockScreenControls;
@@ -779,7 +915,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   const latest = useRef<PlayerActions>(null as unknown as PlayerActions);
   latest.current = {
     open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep,
-    setSkips, setSeekStep, setSurround, stop, updateMeta,
+    setSkips, setSeekStep, setSurround, setRewindAfterPause, stop, updateMeta,
     isPlaying: () => st.current.playing,
   };
   const actions = useMemo(() => {
@@ -805,10 +941,11 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     book: s.book, meta: s.meta, chapters: s.chapters, embedded: s.embedded, index: s.index,
     seekBase: s.seekBase, local: s.local, rate: s.rate, error: s.error, sleep: s.sleep,
     skipBack: s.skipBack, skipForward: s.skipForward, seekStep: s.seekStep, surround: s.surround,
+    rewindAfterPause: s.rewindAfterPause,
     displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
     chapterName, chapterIndex, chapterCount, embeddedIndex,
   }), [actions, s.book, s.meta, s.chapters, s.embedded, s.index, s.seekBase, s.local, s.rate, s.error,
-    s.sleep, s.skipBack, s.skipForward, s.seekStep, s.surround, embeddedIndex, chapterName, chapterIndex, chapterCount]);
+    s.sleep, s.skipBack, s.skipForward, s.seekStep, s.surround, s.rewindAfterPause, embeddedIndex, chapterName, chapterIndex, chapterCount]);
 
   const tick = useMemo<PlayerTick>(() => ({
     position: s.position, positionAt: s.positionAt, seekPending: s.seekPending,

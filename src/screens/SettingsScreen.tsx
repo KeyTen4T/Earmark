@@ -33,13 +33,18 @@ import { formatBytes } from '../scrapers/template';
 import type { Downloads } from '../downloads/state';
 import { toggleNarrator } from '../narrators';
 import { isTV } from '../layout';
+import type { TBTorrent } from '../torbox';
+import type { BookMeta } from '../storage';
+import { ListeningStatsSheet } from './ListeningStats';
 
-export function SettingsScreen({ builtins, userScrapers, disabled, narrators, library, readElsewhere, onScrapers, onDisabled, onNarrators, onReadElsewhere, onImported, onSignOut, bottomPad }: {
+export function SettingsScreen({ builtins, userScrapers, disabled, narrators, library, books, meta, readElsewhere, onScrapers, onDisabled, onNarrators, onReadElsewhere, onImported, onSignOut, bottomPad }: {
   builtins: ScraperDef[];
   userScrapers: ScraperDef[];
   disabled: string[];
   narrators: string[];
   library: LibraryBook[];
+  books: TBTorrent[];
+  meta: Record<string, BookMeta>;
   readElsewhere: ReadElsewhere[];
   onScrapers: (s: ScraperDef[]) => void;
   onDisabled: (ids: string[]) => void;
@@ -83,6 +88,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
   }, []);
   useEffect(() => { reloadRaServer(); }, [reloadRaServer]);
   const [ebookOpen, setEbookOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   const [narratorsOpen, setNarratorsOpen] = useState(false);
   const [ebookUrl, setEbookUrl] = useState('');
   const reloadEbookUrl = useCallback(() => {
@@ -303,6 +309,14 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
             right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
         </Section>
 
+        <Section title="Listening">
+          <Row last onPress={() => setStatsOpen(true)}
+            left={<Badge icon="stats-chart" color="#FFB547" />}
+            title="Listening stats"
+            sub="Time listened this week and this year, streaks and top books"
+            right={<Ionicons name="chevron-forward" size={18} color={C.faint} />} />
+        </Section>
+
         <Section title="Sync">
           <Row last onPress={() => setSyncOpen(true)}
             left={<Badge icon="sync-outline" color="#3D7BFF" />}
@@ -371,6 +385,16 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
             <Text style={[T.body, { marginTop: 6 }]}>Skip forward</Text>
             <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
               {[10, 15, 30, 45, 60].map((n) => <Chip key={n} label={`${n}s`} active={player.skipForward === n} onPress={() => player.setSkips(player.skipBack, n)} />)}
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={T.body}>Rewind after a pause</Text>
+                <Text style={[T.small, { marginTop: 2 }]}>Goes back 2–20 s, longer for longer pauses</Text>
+              </View>
+              <FocusSwitch value={player.rewindAfterPause} onValueChange={player.setRewindAfterPause}
+                accessibilityLabel="Rewind after a pause"
+                trackColor={{ false: C.line, true: C.accent }} thumbColor={C.text}
+                {...({ activeThumbColor: C.text, activeTrackColor: C.accent } as any)} />
             </View>
             {isTV ? (
               <>
@@ -463,6 +487,7 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
       <ReadalongServerSheet visible={raOpen} onClose={() => setRaOpen(false)} onChanged={reloadRaServer} />
       <EbookSearchSheet visible={ebookOpen} onClose={() => setEbookOpen(false)} onChanged={reloadEbookUrl} />
       <NarratorsSheet visible={narratorsOpen} onClose={() => setNarratorsOpen(false)} narrators={narrators} onNarrators={onNarrators} />
+      <ListeningStatsSheet visible={statsOpen} onClose={() => setStatsOpen(false)} books={books} meta={meta} />
       <ImportBackupSheet visible={!!importData} file={importData} busy={backupBusy} onClose={() => setImportData(null)} onMerge={() => applyImport('merge')} onReplace={() => applyImport('replace')} onAdd={addSetup} />
     </View>
   );

@@ -292,5 +292,8 @@ export function replaceDoc(device: SyncDoc, file: SyncDoc, now: number): SyncDoc
   out.readalong = stamp(device.readalong, file.readalong);
   out.settings = { value: file.settings.value, updated: now };
   out.ebookSearch = { value: file.ebookSearch.value, updated: now };
+  // The listening log has no tombstones and is additive by device, so Replace simply takes the file's.
+  out.listening = file.listening ?? {};
+  out.listeningEstimate = file.listeningEstimate ?? null;
   return out;
 }

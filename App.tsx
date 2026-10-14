@@ -27,7 +27,8 @@ import { fillMissingCovers } from './src/covers';
 import { bookFinishedAt } from './src/shelf';
 import type { LibraryBook, ReadElsewhere } from './src/reading-history';
 import { initDownloads, cachedBooks } from './src/downloads';
-import { initSync, setSyncLibrary, syncNow, onSyncApplied } from './src/sync';
+import { initSync, setSyncLibrary, syncNow, onSyncApplied, getSyncStatus, subscribeSyncStatus } from './src/sync';
+import { maybeCreateListeningEstimate } from './src/listening-estimate';
 import { reconcilePendingJobs } from './src/readalong/background';
 import { BUILTIN_SCRAPERS } from './src/scrapers/builtin';
 import type { ScraperDef } from './src/scrapers/engine';
@@ -196,6 +197,32 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   useEffect(() => { if (loaded) void syncNow(); }, [loaded]);
   useEffect(() => onSyncApplied(() => { void refresh(true); loadProgress().then(setProgress); }), [refresh]);
 
+  // The one-time estimate of listening done before tracking. It waits for sync to be identified and
+  // for the first cycle to finish (so a snapshot from another device has had the chance to arrive),
+  // unless sync is off, then builds once and freezes. A failure or an unavailable length is retried
+  // on the next launch.
+  const [estimateReady, setEstimateReady] = useState(false);
+  const syncIdentified = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    // ignore the immediate callback until sync has actually read the stored token, so a not-yet-read
+    // token is not mistaken for "sync is off" and a snapshot is built too early.
+    const evaluate = (s: { connected: boolean; lastSyncAt: number }) => {
+      if (!syncIdentified.current) return;
+      if (!s.connected || s.lastSyncAt > 0) setEstimateReady(true);
+    };
+    const off = subscribeSyncStatus(evaluate);
+    // Shell's effects run before App's, so make sure sync has read the stored token before deciding.
+    void initSync().then(() => { if (!alive) return; syncIdentified.current = true; evaluate(getSyncStatus()); });
+    return () => { alive = false; off(); };
+  }, []);
+  const estimateTried = useRef(false);
+  useEffect(() => {
+    if (!loaded || estimateTried.current || !estimateReady || !books.length) return;
+    estimateTried.current = true;
+    void maybeCreateListeningEstimate(books).catch(() => { estimateTried.current = false; });
+  }, [loaded, estimateReady, books]);
+
   // Progress changes while listening; re-read it when returning to the library.
   useEffect(() => { if (tab === 'library' && !playerOpen) loadProgress().then(setProgress); }, [tab, playerOpen]);
 
@@ -284,7 +311,7 @@ function Shell({ token, onSignOut }: { token: string; onSignOut: () => void }) {
       <TabPane active={tab === 'sources'}>
         <SettingsScreen builtins={builtins} userScrapers={userScrapers} disabled={disabled} bottomPad={bottomPad}
           narrators={narrators}
-          library={library} readElsewhere={readElsewhere}
+          library={library} books={books} meta={meta} readElsewhere={readElsewhere}
           onNarrators={(l) => { setNarrators(l); saveFavNarrators(l); }}
           onScrapers={(s) => { setUserScrapers(s); saveUserScrapers(s); }}
           onDisabled={(d) => { setDisabled(d); saveDisabled(d); }}

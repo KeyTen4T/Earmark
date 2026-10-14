@@ -14,7 +14,26 @@ personal details in tracked files; they belong in `private/` (ignored by git), w
 unedited notes from before the repo went public. The earlier history and the releases up to 1.3.5 are
 in the private `KeyTen4T/Earmark-private`.
 
-- **Current release: 1.3.18** (13 Oct): 5.1 books as Dolby Digital on Android TV. Seen working on
+- **Current release: 1.3.19** (14 Oct): rewind after a pause and listening stats. Run in a browser
+  against a fake library and a fake gist; not run on Android, a TV, or against the real gist.
+  - Rewind after a pause (`src/player/rewind.ts`): 0 s under 5 s paused, then 2 / 5 / 10 / 20 s up to
+    an hour and beyond. Detected on the status listener's playing false → true, so lock-screen and
+    headphone resumes (which never reach `toggle()`) are covered; seeks, chapter loads, recovery reloads
+    and buffering stalls do not count as pauses. Opening a book uses the same scale from `saved.updated`,
+    never less than the old 3 s. Settings → Playback → "Rewind after a pause", device-local, default on.
+  - Listening log (`src/listening-log.ts`): book seconds and wall seconds per device / local day /
+    book, from plausible position advances on the tick (no re-render), flushed every 30 s and on
+    persist. Syncs as the top-level `listening` key, merged by max per leaf; it does not trigger a sync
+    by itself. Stats screen `src/screens/ListeningStats.tsx` (Library chip and Settings row): week,
+    year, 7-day bars, streaks (≥ 5 min wall time a day), finished this year, top books, average speed.
+  - Pre-tracking estimate (`src/listening-estimate.ts`, top-level sync key `listeningEstimate`), made
+    once: from the sync gist's revision history when sync is set up (last revision per local day,
+    forward deltas per book, a jump over 16 h in a day capped, the first sighting uncapped), otherwise
+    from current progress. The part history does not cover is a lump dated by `finishedAt` /
+    `Progress.updated`. Estimates count in totals and bars (lighter) but never in streaks or speed. A
+    `history` snapshot beats a `progress` one, then earliest `createdAt`. The user's real case: about
+    20 h into Dune, 10 h in the week before 13 Oct and 10 h months earlier.
+- **1.3.18** (13 Oct): 5.1 books as Dolby Digital on Android TV. Seen working on
   the user's Shield (Vizio 5.1 soundbar over the TV's eARC); not run on a phone or the onn.
   - The user's TV takes surround only as Dolby (2-channel PCM even over eARC), so Android downmixed
     5.1 Opus to stereo. `modules/earmark-surround/` (local Expo module, Android only) encodes 6-channel

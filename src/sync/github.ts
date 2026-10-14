@@ -79,3 +79,68 @@ export async function writeGist(token: string, id: string, content: string, sign
   if (res.status === 404) throw new GistMissing('Sync gist not found');
   if (!res.ok) throw new Error(`Could not update the sync gist (GitHub ${res.status})`);
 }
+
+// ---- Revision history, for dating listening that predates the log ----
+
+/** One commit in a gist's history. */
+export type GistCommit = { version: string; committed_at: string };
+
+/** HTTP requests one history reconstruction may make; past this, older revisions are left unknown. */
+export const HISTORY_REQUEST_CAP = 1500;
+
+/** A mutable counter shared across one history run. */
+export type RequestBudget = { remaining: number };
+export const makeBudget = (total = HISTORY_REQUEST_CAP): RequestBudget => ({ remaining: total });
+
+/** Thrown once a history run has spent its whole request budget. */
+export class BudgetExhausted extends Error {}
+
+/** Counts one HTTP request; throws once the budget is gone so the caller can keep what it has. */
+function spend(budget?: RequestBudget): void {
+  if (!budget) return;
+  if (budget.remaining <= 0) throw new BudgetExhausted('history request budget exhausted');
+  budget.remaining--;
+}
+
+/**
+ * The gist's commits, newest first. Pages 100 at a time until a short page or the budget runs out, so
+ * a caller with a limited budget still gets the recent revisions. The token is a header, never a URL.
+ */
+export async function listGistCommits(token: string, id: string, signal?: AbortSignal, budget?: RequestBudget): Promise<GistCommit[]> {
+  const out: GistCommit[] = [];
+  for (let page = 1; page <= 100; page++) {
+    if (budget && budget.remaining <= 0) break;
+    spend(budget);
+    const res = await call(token, `/gists/${id}/commits?per_page=100&page=${page}`, {}, signal);
+    if (res.status === 404) throw new GistMissing('Sync gist not found');
+    if (!res.ok) throw new Error(`GitHub error ${res.status}`);
+    const list = await res.json() as unknown;
+    if (!Array.isArray(list)) break;
+    for (const c of list as any[]) {
+      const version = c?.version;
+      const at = c?.committed_at;
+      if (typeof version === 'string' && version && typeof at === 'string' && at) out.push({ version, committed_at: at });
+    }
+    if (list.length < 100) break;
+  }
+  return out;
+}
+
+/** The sync file at one revision, or null when that revision has no sync file. Follows `truncated`. */
+export async function readGistVersion(token: string, id: string, sha: string, signal?: AbortSignal, budget?: RequestBudget): Promise<string | null> {
+  spend(budget);
+  const res = await call(token, `/gists/${id}/${sha}`, {}, signal);
+  if (res.status === 404) throw new GistMissing('Sync revision not found');
+  if (!res.ok) throw new Error(`GitHub error ${res.status}`);
+  const gist = await res.json() as any;
+  const file = gist?.files?.[SYNC_FILE];
+  if (!file) return null;
+  if (file.truncated && file.raw_url) {
+    // raw_url is pre-signed; deliberately no Authorization header on a different host.
+    spend(budget);
+    const raw = await fetchWithTimeout(String(file.raw_url), { signal }, SYNC_TIMEOUT_MS);
+    if (!raw.ok) throw new Error(`Could not read the sync revision (HTTP ${raw.status})`);
+    return raw.text();
+  }
+  return typeof file.content === 'string' ? file.content : null;
+}

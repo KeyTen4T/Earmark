@@ -14,6 +14,7 @@ import { mergeRemoteBuiltins } from './scrapers/merge';
 import { serial } from './write-queue';
 import { shouldApplyRemoteProgress } from './remote-progress';
 import { mergeSettings, syncedSettingsChanged, type Settings } from './settings';
+import { addListeningLog, mergeListening, mergeListeningEstimates, type ListeningLog, type ListeningEstimate } from './listening-log';
 
 const KEY = 'torbox_api_key';
 export const getApiKey = () => getSecret(KEY);
@@ -312,6 +313,60 @@ export async function applyRemoteReadalong(entries: { hash: string; value: Reada
   });
 }
 
+// ---- Listening log: seconds listened per device, local day and book. Syncs and rides a backup. ----
+// The player accumulates in memory and flushes here. Each flush adds its delta; a sync merge takes
+// the larger leaf (see src/listening-log.ts), so every device only ever grows its own leaves.
+export const loadListeningLog = () => getJSON<ListeningLog>('listening_log', {});
+
+/** Adds the player's in-memory pending log to storage. Additive: repeated flushes must not double-count. */
+export async function flushListening(patch: ListeningLog) {
+  if (!patch || !Object.keys(patch).length) return;
+  await serial(async () => {
+    const all = await loadListeningLog();
+    addListeningLog(all, patch);
+    await setJSON('listening_log', all);
+  });
+}
+
+/** Writes the merged log that came from sync, taking the larger leaf per device/day/book. */
+export async function applyRemoteListening(log: ListeningLog) {
+  await serial(async () => {
+    const all = await loadListeningLog();
+    await setJSON('listening_log', mergeListening(all, log));
+  });
+}
+
+// ---- The one-time estimate of listening done before tracking (synced; frozen once created) ----
+export const loadListeningEstimate = () => getJSON<ListeningEstimate | null>('listening_estimate', null);
+/** Writes the snapshot the controller built. Only the controller writes it, and only once. */
+export async function saveListeningEstimate(est: ListeningEstimate | null) {
+  await serial(async () => { await setJSON('listening_estimate', est); });
+}
+/** Applies a snapshot from sync, keeping the earlier one so two devices converge on a single one. */
+export async function applyRemoteListeningEstimate(est: ListeningEstimate | null) {
+  await serial(async () => {
+    const local = await loadListeningEstimate();
+    await setJSON('listening_estimate', mergeListeningEstimates(local, est));
+  });
+}
+
+// ---- The device id the listening log is keyed by. Random, generated once, device-local (never in
+// backups: a restored id would merge this device's log into another one's). ----
+const DEVICE_ID_KEY = 'listening_device_id';
+function randomDeviceId(): string {
+  const rand = () => Math.random().toString(36).slice(2, 10);
+  return `${Date.now().toString(36)}-${rand()}${rand()}`;
+}
+export async function loadDeviceId(): Promise<string> {
+  return serial(async () => {
+    const existing = await getJSON<string>(DEVICE_ID_KEY, '');
+    if (existing) return existing;
+    const id = randomDeviceId();
+    await setJSON(DEVICE_ID_KEY, id);
+    return id;
+  });
+}
+
 // ---- Read-along build server (the URL is plain storage; the token is a secret) ----
 const READALONG_SERVER_TOKEN = 'readalong_server_token';
 const READALONG_SERVER_URL = 'readalong_server_url';
@@ -415,7 +470,7 @@ export async function migrateRemoteBuiltins(): Promise<ScraperDef[]> {
 
 // ---- Misc settings ----
 // seekStep: seconds the seek bar moves per Left/Right press of a TV remote. Device-local, like
-// lastBookId and surround, so only the synced playback fields count as a real change.
+// lastBookId, surround and rewindAfterPause, so only the synced playback fields count as a real change.
 export type { Settings } from './settings';
 export const loadSettings = async () => mergeSettings(await getJSON<Partial<Settings>>('settings', {}));
 export async function saveSettings(patch: Partial<Settings>) {

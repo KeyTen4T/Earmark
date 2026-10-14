@@ -24,10 +24,21 @@ test('settings: an unknown stored surround value falls back to auto', () => {
   assert.equal(mergeSettings({ surround: 'stereo' }).surround, 'stereo');
 });
 
+test('settings: rewindAfterPause defaults on and rejects non-booleans', () => {
+  assert.equal(DEFAULT_SETTINGS.rewindAfterPause, true);
+  assert.equal(mergeSettings({}).rewindAfterPause, true);
+  assert.equal(mergeSettings({ rewindAfterPause: undefined }).rewindAfterPause, true);
+  assert.equal(mergeSettings({ rewindAfterPause: 'yes' as any }).rewindAfterPause, true);
+  assert.equal(mergeSettings({ rewindAfterPause: 0 as any }).rewindAfterPause, true);
+  assert.equal(mergeSettings({ rewindAfterPause: false }).rewindAfterPause, false);
+  assert.equal(mergeSettings({ rewindAfterPause: true }).rewindAfterPause, true);
+});
+
 test('settings: only the synced fields count as a real change', () => {
   const base = mergeSettings({ rate: 1.25, skipBack: 10, skipForward: 30, seekStep: 5, surround: 'auto' });
   assert.equal(syncedSettingsChanged(base, { ...base, surround: 'stereo' }), false);
   assert.equal(syncedSettingsChanged(base, { ...base, seekStep: 60 }), false);
+  assert.equal(syncedSettingsChanged(base, { ...base, rewindAfterPause: false }), false);
   assert.equal(syncedSettingsChanged(base, { ...base, lastBookId: 7 }), false);
   assert.equal(syncedSettingsChanged(base, { ...base, rate: 1.5 }), true);
   assert.equal(syncedSettingsChanged(base, { ...base, skipBack: 30 }), true);

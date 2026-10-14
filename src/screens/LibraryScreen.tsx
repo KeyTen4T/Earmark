@@ -22,6 +22,7 @@ import { bookFinishedAt, entryFinishedAt, formatFinishedDate, ratingAfterTap, sh
 import { syncRating } from '../hardcover';
 import { bookMetrics, cardRows, finishedRows, type BookMetrics } from '../library-rows';
 import type { ReadElsewhere } from '../reading-history';
+import { ListeningStatsSheet } from './ListeningStats';
 
 type Filter = 'all' | 'listening' | 'new' | 'done';
 
@@ -79,6 +80,7 @@ export function LibraryScreen(props: {
   const [coverFor, setCoverFor] = useState<TBTorrent | null>(null);
   const [editFor, setEditFor] = useState<TBTorrent | null>(null);
   const [showStuck, setShowStuck] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   // Books being removed. TorBox can keep listing one for a few seconds after confirming the delete.
   const [removing, setRemoving] = useState<number[]>([]);
   const books = useMemo(() => props.books.filter((b) => !removing.includes(b.id)), [props.books, removing]);
@@ -411,6 +413,7 @@ export function LibraryScreen(props: {
         {([['all', 'All'], ['listening', 'In progress'], ['new', 'Not started'], ['done', 'Finished']] as [Filter, string][]).map(([k, l]) => (
           <Chip key={k} label={l} active={filter === k} onPress={() => setFilter(k)} />
         ))}
+        <Chip label="Listening stats" icon="stats-chart" onPress={() => setStatsOpen(true)} />
       </ChipRow>
     </>
   );
@@ -539,6 +542,7 @@ export function LibraryScreen(props: {
 
       {coverFor && <CoverPicker visible onClose={() => setCoverFor(null)} book={coverFor} meta={m(coverFor)} onSaved={props.onMeta} />}
       {editFor && <EditDetailsSheet visible onClose={() => setEditFor(null)} book={editFor} meta={m(editFor)} onSaved={props.onMeta} />}
+      <ListeningStatsSheet visible={statsOpen} onClose={() => setStatsOpen(false)} books={props.books} meta={meta} />
     </View>
   );
 }
