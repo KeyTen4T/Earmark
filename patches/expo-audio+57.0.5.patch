@@ -1,0 +1,33 @@
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+index c76a9fd..b3a5799 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+@@ -26,6 +26,20 @@ private const val PLAYBACK_STATUS_UPDATE = "playbackStatusUpdate"
+ private const val AUDIO_SAMPLE_UPDATE = "audioSampleUpdate"
+ private const val SEEK_JUMP_INTERVAL_MS: Long = 10_000
+ 
++/**
++ * Builds Earmark's surround-capable renderers factory when the local module is present, and the
++ * stock factory otherwise. Reflection keeps expo-audio free of any Gradle dependency on the module.
++ */
++private fun buildSurroundRenderersFactory(context: Context): androidx.media3.exoplayer.RenderersFactory {
++  return try {
++    Class.forName("app.earmark.surround.SurroundRenderersFactory")
++      .getConstructor(Context::class.java)
++      .newInstance(context) as androidx.media3.exoplayer.RenderersFactory
++  } catch (error: Throwable) {
++    androidx.media3.exoplayer.DefaultRenderersFactory(context)
++  }
++}
++
+ @UnstableApi
+ class AudioPlayer(
+   context: Context,
+@@ -35,6 +49,7 @@ class AudioPlayer(
+   bufferDurationMs: Long = 0
+ ) : BaseAudioPlayer(
+   player = ExoPlayer.Builder(context)
++    .setRenderersFactory(buildSurroundRenderersFactory(context))
+     .setLooper(context.mainLooper)
+     .setAudioAttributes(AudioAttributes.DEFAULT, false)
+     .setSeekForwardIncrementMs(SEEK_JUMP_INTERVAL_MS)

@@ -1,0 +1,54 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.earmark.surround'
+version = '1.0.0'
+
+// Build only the ABIs the app asks for (apk:local passes armeabi-v7a,arm64-v8a), like
+// expo-modules-core does.
+def reactNativeArchitectures() {
+  def value = project.getProperties().get("reactNativeArchitectures")
+  return value ? value.split(",") : ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+}
+
+android {
+  namespace "app.earmark.surround"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+    consumerProguardFiles 'proguard-rules.pro'
+    externalNativeBuild {
+      cmake {
+        abiFilters(*reactNativeArchitectures())
+        // Plain C, no SIMD, no threads; -O2 as required.
+        cFlags "-O2"
+        arguments "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path "CMakeLists.txt"
+    }
+  }
+
+  buildFeatures {
+    prefab false
+  }
+}
+
+dependencies {
+  // The audio sink implements media3's AudioSink and wraps a DefaultAudioSink, but media3 must
+  // not be bundled again: expo-audio already brings it into the app. `compileOnly` keeps it on
+  // our compile classpath only, so no second media3 version is ever pulled in. The version
+  // mirrors `androidxMedia3Version` in node_modules/expo-audio/android/build.gradle (1.9.0).
+  def androidxMedia3Version = "1.9.0"
+  compileOnly "androidx.media3:media3-exoplayer:$androidxMedia3Version"
+  compileOnly "androidx.media3:media3-common:$androidxMedia3Version"
+
+  // PcmBlockBatcher is plain JVM code; the unit tests fake the encoder and the writer.
+  testImplementation "junit:junit:4.13.2"
+}

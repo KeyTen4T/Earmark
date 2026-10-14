@@ -1,0 +1,6 @@
+{
+  "name": "earmark-surround",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Expo module: native AC-3 (Dolby Digital) encoder for 5.1 surround."
+}

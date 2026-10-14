@@ -14,7 +14,8 @@
     "apk:emulator": "cd android && JAVA_HOME=$(ls -d /usr/lib/jvm/java-17-openjdk-* | head -1) ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --max-workers=3 --no-daemon",
     "desktop:build": "expo export --platform web --output-dir dist && rm -rf desktop/web && cp -r dist desktop/web",
     "desktop": "npm run desktop:build && npm --prefix desktop start",
-    "desktop:dist": "npm run desktop:build && npm --prefix desktop run dist"
+    "desktop:dist": "npm run desktop:build && npm --prefix desktop run dist",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.16",
@@ -42,6 +43,16 @@
     "typescript": "~6.0.3"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4"
+    "@types/node": "^26.6.4",
+    "patch-package": "^8.0.0"
+  },
+  "expo": {
+    "autolinking": {
+      "android": {
+        "buildFromSource": [
+          "expo-audio"
+        ]
+      }
+    }
   }
 }
