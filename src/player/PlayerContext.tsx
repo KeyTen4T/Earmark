@@ -6,6 +6,8 @@ import { TBTorrent, TBFile, chapterList, chapterTitle, getStreamUrl } from '../t
 import { chapterAt, chapterBounds, type EmbeddedChapter } from '../chapters/embedded';
 import { fetchEmbeddedChapters } from '../chapters/fetch';
 import { loadProgress, saveProgress, saveMeta, loadSettings, saveSettings, loadEmbeddedChapters, saveEmbeddedChapters, BookMeta } from '../storage';
+import { setSurroundEnabled } from '../surround';
+import type { SurroundSetting } from '../settings';
 import { prettyName } from '../theme';
 import { syncProgress } from '../hardcover';
 import { syncNow, syncAfterProgress, onSyncApplied } from '../sync';
@@ -50,6 +52,8 @@ type PlayerState = {
   skipForward: number;
   /** Seconds the seek bar moves per Left/Right press of a TV remote. */
   seekStep: number;
+  /** Whether 5.1 books are offered as Dolby Digital (AC-3), or always downmixed to stereo. TV only. */
+  surround: SurroundSetting;
 };
 
 /** A field a playback status tick can move; these are the ones held back while backgrounded. */
@@ -60,7 +64,7 @@ type PlayerTick = Pick<PlayerState, TickField>;
 
 /** The action functions: stable identities, so the stable context value never changes per tick. */
 type PlayerActions = Pick<PlayerApi, 'open' | 'toggle' | 'seek' | 'skip' | 'goChapter' | 'pickChapter'
-  | 'prevChapter' | 'nextChapter' | 'setRate' | 'setSleep' | 'setSkips' | 'setSeekStep' | 'stop'
+  | 'prevChapter' | 'nextChapter' | 'setRate' | 'setSleep' | 'setSkips' | 'setSeekStep' | 'setSurround' | 'stop'
   | 'updateMeta' | 'isPlaying'>;
 
 /**
@@ -82,6 +86,7 @@ type PlayerApi = Omit<PlayerState, TickField> & {
   setSleep: (m: 'off' | 'chapter' | number) => void;
   setSkips: (back: number, forward: number) => void;
   setSeekStep: (seconds: number) => void;
+  setSurround: (mode: SurroundSetting) => void;
   stop: () => void;
   /** Refreshes the now-playing book's metadata (e.g. a new cover); ignored if another book is playing. */
   updateMeta: (bookId: number, m: BookMeta) => void;
@@ -121,7 +126,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     book: null, meta: {}, chapters: [], embedded: null, index: 0, position: 0, positionAt: 0, seekPending: false,
     seekBase: null,
     duration: 0, playing: false, loading: false,
-    recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30, seekStep: 5,
+    recovering: false, local: false, rate: 1, error: '', sleep: null, skipBack: 15, skipForward: 30, seekStep: 5, surround: 'auto',
   });
   const st = useRef(s);
   // Whether React is currently drawing. While the app is backgrounded the refs keep advancing but
@@ -262,7 +267,12 @@ export function PlayerProvider({ token, children }: { token: string; children: R
 
   useEffect(() => {
     setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' } as any).catch(() => {});
-    loadSettings().then((x) => patch({ rate: x.rate, skipBack: x.skipBack, skipForward: x.skipForward, seekStep: x.seekStep }));
+    loadSettings().then((x) => {
+      // Tell the native sink the stored choice before any book is opened, so the very first chapter
+      // of the session is configured with the right path.
+      setSurroundEnabled(x.surround === 'auto');
+      patch({ rate: x.rate, skipBack: x.skipBack, skipForward: x.skipForward, seekStep: x.seekStep, surround: x.surround });
+    });
     const check = setInterval(checkNow, CHECK_INTERVAL_MS);
     return () => {
       // Pause before letting go: a released player can keep sounding in the background with nothing left to control it.
@@ -732,6 +742,22 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     saveSettings({ seekStep: seconds });
   };
 
+  const setSurround = (mode: SurroundSetting) => {
+    patch({ surround: mode });
+    saveSettings({ surround: mode });
+    setSurroundEnabled(mode === 'auto');
+    // The native sink decides its path in configure(), so a new choice must rebuild the current
+    // source for it to take effect now. Re-open the same chapter at the live position — the same
+    // path recovery uses. `loadChapter` carries the position and the play intent, so playback
+    // continues where it was and the saved position never jumps.
+    const c = st.current;
+    if (!c.book || !c.chapters[c.index]) return;
+    const playing = c.playing || !!player.current?.playing;
+    cancelRecovery();
+    persist(true);
+    void loadChapter(c.index, c.position, playing);
+  };
+
   const stop = () => {
     wantPlaying.current = false;
     localChapter.current = false;
@@ -753,7 +779,7 @@ export function PlayerProvider({ token, children }: { token: string; children: R
   const latest = useRef<PlayerActions>(null as unknown as PlayerActions);
   latest.current = {
     open, toggle, seek, skip, goChapter, pickChapter, prevChapter, nextChapter, setRate, setSleep,
-    setSkips, setSeekStep, stop, updateMeta,
+    setSkips, setSeekStep, setSurround, stop, updateMeta,
     isPlaying: () => st.current.playing,
   };
   const actions = useMemo(() => {
@@ -778,11 +804,11 @@ export function PlayerProvider({ token, children }: { token: string; children: R
     ...actions,
     book: s.book, meta: s.meta, chapters: s.chapters, embedded: s.embedded, index: s.index,
     seekBase: s.seekBase, local: s.local, rate: s.rate, error: s.error, sleep: s.sleep,
-    skipBack: s.skipBack, skipForward: s.skipForward, seekStep: s.seekStep,
+    skipBack: s.skipBack, skipForward: s.skipForward, seekStep: s.seekStep, surround: s.surround,
     displayTitle: s.book ? s.meta.title ?? prettyName(s.book.name) : '',
     chapterName, chapterIndex, chapterCount, embeddedIndex,
   }), [actions, s.book, s.meta, s.chapters, s.embedded, s.index, s.seekBase, s.local, s.rate, s.error,
-    s.sleep, s.skipBack, s.skipForward, s.seekStep, embeddedIndex, chapterName, chapterIndex, chapterCount]);
+    s.sleep, s.skipBack, s.skipForward, s.seekStep, s.surround, embeddedIndex, chapterName, chapterIndex, chapterCount]);
 
   const tick = useMemo<PlayerTick>(() => ({
     position: s.position, positionAt: s.positionAt, seekPending: s.seekPending,

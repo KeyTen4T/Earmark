@@ -13,6 +13,7 @@ import { parseStored } from './json-store';
 import { mergeRemoteBuiltins } from './scrapers/merge';
 import { serial } from './write-queue';
 import { shouldApplyRemoteProgress } from './remote-progress';
+import { mergeSettings, syncedSettingsChanged, type Settings } from './settings';
 
 const KEY = 'torbox_api_key';
 export const getApiKey = () => getSecret(KEY);
@@ -413,18 +414,16 @@ export async function migrateRemoteBuiltins(): Promise<ScraperDef[]> {
 }
 
 // ---- Misc settings ----
-// seekStep: seconds the seek bar moves per Left/Right press of a TV remote. Device-local, like lastBookId.
-export type Settings = { rate: number; skipBack: number; skipForward: number; seekStep: number; lastBookId?: number };
-const DEFAULT_SETTINGS: Settings = { rate: 1, skipBack: 15, skipForward: 30, seekStep: 5 };
-export const loadSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await getJSON<Partial<Settings>>('settings', {})) });
-const sameSettings = (a: Settings, b: Settings) => a.rate === b.rate && a.skipBack === b.skipBack && a.skipForward === b.skipForward;
+// seekStep: seconds the seek bar moves per Left/Right press of a TV remote. Device-local, like
+// lastBookId and surround, so only the synced playback fields count as a real change.
+export type { Settings } from './settings';
+export const loadSettings = async () => mergeSettings(await getJSON<Partial<Settings>>('settings', {}));
 export async function saveSettings(patch: Partial<Settings>) {
   await serial(async () => {
     const before = await loadSettings();
     const after = { ...before, ...patch };
     await setJSON('settings', after);
-    // lastBookId and seekStep are device-local: only the synced playback settings count as a real change.
-    if (!sameSettings(before, after)) {
+    if (syncedSettingsChanged(before, after)) {
       const stamps = await loadStamps();
       stamps.settings = Date.now();
       await saveStamps(stamps);

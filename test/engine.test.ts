@@ -76,6 +76,8 @@ import './library-rows.test.ts';
 import './write-queue.test.ts';
 import './remote-progress.test.ts';
 import './fetch-timeout.test.ts';
+// The playback-settings defaults and the device-local/synced split (the surround choice is local).
+import './settings.test.ts';
 
 test('sha1 matches node crypto across lengths', () => {
   for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 1000, 70000]) {

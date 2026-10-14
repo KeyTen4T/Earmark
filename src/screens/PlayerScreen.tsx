@@ -26,6 +26,7 @@ import { checkPendingForBook } from '../readalong/background';
 import { jobActive } from '../readalong/job';
 import { subscribeSyncStatus } from '../sync';
 import { useLayout, isTV } from '../layout';
+import { outputMode } from '../surround';
 import { useEscape } from '../escape';
 import { playerPanes } from '../player/panes';
 import { CarMode } from './CarMode';
@@ -375,7 +376,10 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         <Text numberOfLines={1} style={[T.body, { marginTop: 4, fontSize: 15 }]}>
           {p.meta.author ?? hcLink?.authors?.[0] ?? p.chapterName}
         </Text>
-        <AudioBadges name={book.name} style={{ marginTop: 6 }} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+          <AudioBadges name={book.name} />
+          <SurroundBadge active={visible && appActive} />
+        </View>
       </View>
       {hcOn && (
         <Tap onPress={() => setSheet('hardcover')} scaleTo={0.9} style={{
@@ -585,6 +589,29 @@ export function PlayerScreen({ visible, openSheet, onSheetOpened, onClose, onMet
         <CarMode visible={carMode} onClose={() => setCarMode(false)} />
       </View>
     </Modal>
+  );
+}
+
+/**
+ * The "Dolby Digital 5.1" badge. Reads the native sink's chosen path on its own 2 s timer, only
+ * while the player is open and the app is in the foreground, and re-renders only itself when the
+ * value changes (never `usePlayerTick`, so it cannot redraw the player several times a second). An
+ * idle sink, or a phone playing PCM, shows nothing.
+ */
+function SurroundBadge({ active }: { active: boolean }) {
+  const [ac3, setAc3] = useState(false);
+  useEffect(() => {
+    if (!active) { setAc3(false); return; }
+    const read = () => setAc3(outputMode() === 'ac3');
+    read();
+    const id = setInterval(read, 2000);
+    return () => clearInterval(id);
+  }, [active]);
+  if (!ac3) return null;
+  return (
+    <View focusable={false} accessible={false} style={{ backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: C.line, borderRadius: R.pill, paddingHorizontal: 6, paddingVertical: 1 }}>
+      <Text style={{ color: C.sub, fontSize: 10, fontWeight: '800', letterSpacing: 0.3 }}>Dolby Digital 5.1</Text>
+    </View>
   );
 }
 

@@ -47,8 +47,12 @@ available, and speed and pitch are 1.0. Everything else is forwarded untouched. 
 changing away from 1.0 falls back to the plain PCM path. A failing encoder always falls back to
 plain forwarding.
 
-`EarmarkSurround.outputMode()` returns the chosen path (`"ac3"`, `"pcm"` or `"idle"`); the app's
-JavaScript does not call it yet.
+`EarmarkSurround.outputMode()` returns the chosen path (`"ac3"`, `"pcm"` or `"idle"`).
+`EarmarkSurround.setSurroundEnabled(Boolean)` sets the process-wide choice the sink reads in
+`decide()`; it defaults to true and takes effect at the next `configure()`. The app's `src/surround.ts`
+calls both (safe no-ops when the module is absent, e.g. on web or desktop): the Settings → Playback
+"Surround sound" choice sets the flag, and the player shows a "Dolby Digital 5.1" badge while
+`outputMode()` is `"ac3"`.
 
 ## Tests
 

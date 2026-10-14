@@ -379,6 +379,12 @@ export function SettingsScreen({ builtins, userScrapers, disabled, narrators, li
                   {[5, 10, 15, 30, 60].map((n) => <Chip key={n} label={`${n}s`} active={player.seekStep === n} onPress={() => player.setSeekStep(n)} />)}
                 </View>
                 <Text style={T.small}>How far Left and Right move the seek bar in the player.</Text>
+                <Text style={[T.body, { marginTop: 6 }]}>Surround sound</Text>
+                <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                  <Chip label="Auto (Dolby Digital 5.1)" active={player.surround === 'auto'} onPress={() => player.setSurround('auto')} />
+                  <Chip label="Stereo" active={player.surround === 'stereo'} onPress={() => player.setSurround('stereo')} />
+                </View>
+                <Text style={T.small}>Sends 5.1 books as Dolby Digital when the TV or soundbar takes it. Plays at 1× only; other speeds are stereo.</Text>
               </>
             ) : null}
           </View>

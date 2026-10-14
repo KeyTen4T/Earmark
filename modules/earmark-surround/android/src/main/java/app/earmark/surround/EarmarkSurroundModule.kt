@@ -30,5 +30,9 @@ class EarmarkSurroundModule : Module() {
         Function("outputMode") {
             SurroundOutputMode.current
         }
+
+        Function("setSurroundEnabled") { enabled: Boolean ->
+            SurroundSettings.surroundEnabled = enabled
+        }
     }
 }

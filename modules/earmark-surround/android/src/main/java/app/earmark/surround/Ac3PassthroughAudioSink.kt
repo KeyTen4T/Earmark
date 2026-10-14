@@ -14,6 +14,7 @@ import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * The path chosen by the most recently configured sink, without any media3 annotation, so the
@@ -28,6 +29,17 @@ object SurroundOutputMode {
     @Volatile
     var current: String = IDLE
         internal set
+}
+
+/**
+ * Process-wide user choice for the AC-3 path, set from JavaScript by `setSurroundEnabled`. It is
+ * read once per [Ac3PassthroughAudioSink.configure] (and on a speed change); a change therefore
+ * takes effect at the next configure, which the app forces by re-opening the current chapter.
+ * Defaults to true so a build whose JavaScript never calls it behaves exactly as before.
+ */
+object SurroundSettings {
+    @Volatile
+    var surroundEnabled: Boolean = true
 }
 
 /**
@@ -185,6 +197,7 @@ class Ac3PassthroughAudioSink(
         inner.handleBuffer(frame, presentationTimeUs, 1)
 
     private fun decide(format: Format): Decision {
+        if (!SurroundSettings.surroundEnabled) return Decision(Mode.PCM, "off in settings")
         if (!isSixChannelPcm16(format)) return Decision(Mode.PCM, "not 6-channel PCM16")
         val rate = format.sampleRate
         if (rate != 48000 && rate != 44100) return Decision(Mode.PCM, "rate $rate")
@@ -260,7 +273,7 @@ class Ac3PassthroughAudioSink(
         }
         mode = Mode.AC3
         SurroundOutputMode.current = SurroundOutputMode.AC3
-        Log.i(TAG, "passthrough ac3 5.1 $sampleRate")
+        Log.i(TAG, "passthrough ac3 5.1 $sampleRate map ${outputChannels?.joinToString(",") ?: "none"}")
     }
 
     private fun switchToPcm(reason: String) {
@@ -317,8 +330,39 @@ class Ac3PassthroughAudioSink(
     private inner class BatcherEncoder : PcmBlockBatcher.FrameEncoder {
         override val frameBytes: Int get() = encoder?.frameBytes ?: 0
 
-        override fun encode(pcm: ByteBuffer, out: ByteBuffer): Int =
-            checkNotNull(encoder) { "AC-3 encoder is closed" }.encode(pcm, out)
+        // Reused block for channel reordering, allocated on the first block that needs it.
+        private var reordered: ByteBuffer? = null
+
+        /**
+         * media3 passes a channel map in [configure] when the decoder's order is not Android's:
+         * Android's own Opus and Vorbis decoders output Vorbis order (FL FC FR BL BR LFE), and
+         * media3 maps it with `outputChannels` (output channel i takes input channel map[i]). The
+         * PCM path applies it inside the inner sink; here it must be applied before encoding, or
+         * the centre lands on the front right and LFE on the rear right.
+         */
+        override fun encode(pcm: ByteBuffer, out: ByteBuffer): Int {
+            val enc = checkNotNull(encoder) { "AC-3 encoder is closed" }
+            val map = outputChannels
+            if (map == null || map.size != CHANNELS || map.indices.all { map[it] == it }) {
+                return enc.encode(pcm, out)
+            }
+            val bytes = pcm.remaining()
+            val dst = reordered?.takeIf { it.capacity() >= bytes }
+                ?: ByteBuffer.allocateDirect(bytes).order(ByteOrder.LITTLE_ENDIAN).also { reordered = it }
+            val src = pcm.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+            val base = src.position()
+            dst.clear()
+            val frameBytes = CHANNELS * BYTES_PER_SAMPLE
+            val frames = bytes / frameBytes
+            for (f in 0 until frames) {
+                val at = base + f * frameBytes
+                for (ch in 0 until CHANNELS) {
+                    dst.putShort(src.getShort(at + map[ch] * BYTES_PER_SAMPLE))
+                }
+            }
+            dst.flip()
+            return enc.encode(dst, out)
+        }
     }
 
     private enum class Mode { IDLE, AC3, PCM }
